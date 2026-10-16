@@ -287,7 +287,9 @@ def normalizza_api(p):
         'ean': ean_valido(data.get('ean13')),
         'mpn': spazi(data.get('mpn')),
         'peso': numero(p.get('weight')),
-        'm2': numero(dim.get('w')) if numero(dim.get('w')) and 0.05 <= numero(dim.get('w')) <= 20 else None,
+        # m² per confezione: dimension.w, altrimenti dalla descrizione («pacco contiene 1,9m²»)
+        'm2': (numero(dim.get('w')) if numero(dim.get('w')) and 0.05 <= numero(dim.get('w')) <= 20 else None)
+              or m2_confezione(testo(p.get('description')), p.get('title')),
         'varianti': len(p.get('variants') or []) if str(p.get('usevariants')) == '1' else 0,
     }
 
