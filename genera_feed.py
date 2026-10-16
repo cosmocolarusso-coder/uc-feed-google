@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
 """Feed prodotti Google Merchant Center per Universo Ceramiche.
 
-Fonti:
-  - API Storeden (prezzi a confezione, giacenza, stato, EAN, peso, immagini)
-  - file Clerk pubblici di No Gravity su S3 (titoli, descrizioni, link e
-    categorie tradotte nelle altre lingue)
+Tutti i dati arrivano dalle API Storeden (Connect API v1.1):
+  - elenco a pagine: prezzo, giacenza, stato, foto e data di ultima modifica
+    di ogni prodotto, letto per intero ogni notte (~130 chiamate);
+  - scheda completa (EAN, peso, m², su ordinazione, galleria, categorie) e
+    traduzioni di titolo e descrizione: lette solo per i prodotti nuovi o
+    modificati; il resto si riprende dallo stato salvato la notte prima.
+
+Le traduzioni costano una chiamata per campo, prodotto e lingua: il primo
+riempimento richiede qualche notte. Ogni giro si ferma a MAX_CHIAMATE (o al
+limite Storeden di 100.000/24 h), pubblica quello che ha e riprende dopo.
 
 Uso:
-  python3 genera_feed.py                  feed completo da API + Clerk
-  python3 genera_feed.py --solo-clerk     anteprima senza chiave API
-  python3 genera_feed.py --campione       salva il JSON grezzo di un prodotto API
-  python3 genera_feed.py --limite 200     prova su pochi prodotti
-  python3 genera_feed.py --lingue it,fr   solo alcune lingue
-  python3 genera_feed.py --da-cache       rigenera dai dati API dell'ultimo giro
-                                          (out/grezzi.json.gz), senza chiamate
+  python3 genera_feed.py                  giro normale
+  python3 genera_feed.py --limite 200     prova sui primi N prodotti
+  python3 genera_feed.py --lingue it,es   solo alcune lingue
+  python3 genera_feed.py --campione       salva il JSON grezzo di un prodotto
 
 Chiave API: variabili d'ambiente STOREDEN_KEY e STOREDEN_EXCHANGE, oppure il
 file .chiave-storeden.txt accanto allo script con le righe «key: ...» e
 «exchange: ...». Basta una chiave di sola lettura.
 
-Uscita in out/: feed-<lingua>.xml, rapporto.json, index.html.
+Uscita: out/feed-<lingua>.xml, out/rapporto.json, out/index.html (pubblicati)
+        stato/stato.json.gz (NON pubblicato: contiene le giacenze esatte)
 """
 import argparse, datetime, gzip, html, json, os, queue, re, ssl, sys, threading, time
 import urllib.error, urllib.parse, urllib.request
@@ -27,20 +31,23 @@ from xml.sax.saxutils import escape
 
 QUI = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(QUI, 'out')
+STATO = os.path.join(QUI, 'stato', 'stato.json.gz')
 API = 'https://connect.storeden.com/v1.1/'
-S3 = 'https://universoceramiche.s3.eu-south-1.amazonaws.com/'
 IMG = 'https://egress.storeden.net/gallery/'
 
 LINGUE = {
-    # lingua: (locale Clerk, dominio, valuta)
+    # lingua: (locale Storeden, dominio, valuta)
     'it': ('it_IT', 'https://universoceramiche.it', 'EUR'),
     'en': ('en_US', 'https://universoceramiche.com', 'EUR'),
     'de': ('de_DE', 'https://universoceramiche.de', 'EUR'),
     'es': ('es_ES', 'https://universoceramiche.es', 'EUR'),
     'fr': ('fr_FR', 'https://universoceramiche.fr', 'EUR'),
 }
+ORDINE_TRADUZIONI = ['es', 'en', 'de', 'fr']   # chi viene riempito prima
 
-GIORNI_SU_ORDINAZIONE = 14   # se il prodotto non indica packageTime
+MAX_CHIAMATE = int(os.environ.get('MAX_CHIAMATE', 90000))  # Storeden: 100.000 / 24 h per chiave
+GIORNI_SU_ORDINAZIONE = 14     # se il prodotto non indica i giorni di consegna
+GIORNI_CATEGORIE = 7           # ogni quanto rileggere albero e nomi delle categorie
 THREAD_API = 6
 
 # Categoria Google (tassonomia ufficiale). Le regole sono provate in ordine:
@@ -101,18 +108,6 @@ def contesto_ssl():
 SSL = contesto_ssl()
 
 
-def scarica(url, tentativi=4):
-    for t in range(tentativi):
-        try:
-            with urllib.request.urlopen(url, timeout=180, context=SSL) as r:
-                return r.read()
-        except Exception as e:
-            if t == tentativi - 1:
-                raise
-            log('riprovo', url, e)
-            time.sleep(5 * (t + 1))
-
-
 def testo(s):
     """HTML → testo semplice su una riga."""
     s = html.unescape(s or '')
@@ -131,17 +126,6 @@ def numero(v):
         return float(str(v).replace(',', '.'))
     except (TypeError, ValueError):
         return None
-
-
-def prendi(d, *chiavi):
-    """Primo valore non vuoto tra più chiavi possibili (anche «a.b»)."""
-    for k in chiavi:
-        v = d
-        for p in k.split('.'):
-            v = v.get(p) if isinstance(v, dict) else None
-        if v not in (None, '', [], {}):
-            return v
-    return None
 
 
 def ean_valido(v):
@@ -166,6 +150,10 @@ def m2_confezione(*testi):
 
 # ---------------------------------------------------------------- API Storeden
 
+class Stop(Exception):
+    """Budget di chiamate finito o limite Storeden (509) raggiunto."""
+
+
 def credenziali():
     k, e = os.environ.get('STOREDEN_KEY'), os.environ.get('STOREDEN_EXCHANGE')
     f = os.path.join(QUI, '.chiave-storeden.txt')
@@ -178,29 +166,36 @@ def credenziali():
                 else:
                     e = m.group(2)
     if not (k and e):
-        sys.exit('Chiave API mancante: imposta STOREDEN_KEY/STOREDEN_EXCHANGE '
-                 'o crea .chiave-storeden.txt (oppure usa --solo-clerk).')
+        sys.exit('Chiave API mancante: imposta STOREDEN_KEY/STOREDEN_EXCHANGE o crea .chiave-storeden.txt.')
     return k, e
 
 
 class Storeden:
-    def __init__(self):
+    def __init__(self, massimo=MAX_CHIAMATE):
         self.key, self.exchange = credenziali()
-        self.chiamate = 0
+        self.chiamate, self.massimo = 0, massimo
+        self.fermo = None          # motivo dello stop, se c'è
         self.lock = threading.Lock()
 
     def get(self, percorso, **parametri):
         url = API + percorso + ('?' + urllib.parse.urlencode(parametri) if parametri else '')
         for t in range(6):
-            req = urllib.request.Request(url, headers={'key': self.key, 'exchange': self.exchange})
             with self.lock:
+                if self.fermo:
+                    raise Stop(self.fermo)
+                if self.chiamate >= self.massimo:
+                    self.fermo = f'budget di {self.massimo} chiamate esaurito'
+                    raise Stop(self.fermo)
                 self.chiamate += 1
+            req = urllib.request.Request(url, headers={'key': self.key, 'exchange': self.exchange})
             try:
                 with urllib.request.urlopen(req, timeout=60, context=SSL) as r:
                     return json.loads(r.read().decode() or 'null')
             except urllib.error.HTTPError as e:
                 if e.code == 509:
-                    sys.exit('Limite giornaliero API superato (509).')
+                    with self.lock:
+                        self.fermo = 'limite Storeden di 100.000 chiamate in 24 ore raggiunto (509)'
+                    raise Stop(self.fermo)
                 if e.code in (429, 500, 502, 503, 504) and t < 5:
                     time.sleep(3 * (t + 1))
                     continue
@@ -212,51 +207,63 @@ class Storeden:
                 raise
 
 
-def uid_da_api(sd, limite):
-    uids, pagina, pagine = [], 1, 1
-    while pagina <= pagine:
-        j = sd.get('products/paginated_list.json', page=pagina, limit=500)
-        pagine = j.get('total_pages') or 1
-        uids += [p['uid'] for p in j.get('products', [])]
-        if limite and len(uids) >= limite:
-            return uids[:limite]
-        pagina += 1
-    return uids
-
-
-def prodotti_da_api(sd, uids):
-    q, risultati, errori = queue.Queue(), {}, []
-    for u in uids:
-        q.put(u)
-    lock = threading.Lock()
+def in_parallelo(sd, compiti, funzione, nome):
+    """Esegue funzione(compito) su più thread. Si ferma pulito su Stop.
+    Ritorna (fatti, errori)."""
+    q = queue.Queue()
+    for c in compiti:
+        q.put(c)
+    fatti, errori, lock = [0], [], threading.Lock()
 
     def lavora():
-        while True:
+        while not sd.fermo:
             try:
-                u = q.get_nowait()
+                c = q.get_nowait()
             except queue.Empty:
                 return
             try:
-                p = sd.get('products/product.json', uid=u, nodes='categories_name,brand_name,gallery')
+                funzione(c)
                 with lock:
-                    risultati[str(u)] = p
-                    if len(risultati) % 2000 == 0:
-                        log('letti', len(risultati), 'di', len(uids))
+                    fatti[0] += 1
+                    if fatti[0] % 2000 == 0:
+                        log(nome, fatti[0], 'di', len(compiti), '- chiamate', sd.chiamate)
+            except Stop:
+                return
             except Exception as e:
                 with lock:
-                    errori.append((u, str(e)[:200]))
+                    errori.append((c, str(e)[:200]))
 
     th = [threading.Thread(target=lavora) for _ in range(THREAD_API)]
     [t.start() for t in th]
     [t.join() for t in th]
-    return risultati, errori
+    return fatti[0], errori
+
+
+def leggi_elenco(sd, limite):
+    """uid → dati base sempre freschi (una chiamata ogni 500 prodotti)."""
+    elenco, pagina, pagine = {}, 1, 1
+    while pagina <= pagine:
+        j = sd.get('products/paginated_list.json', page=pagina, limit=500,
+                   nodes='update_at,stock_count,image_id')
+        pagine = j.get('total_pages') or 1
+        for p in j.get('products', []):
+            elenco[str(p['uid'])] = {
+                'prezzo': numero(p.get('price')), 'prezzo_finale': numero(p.get('final_price')),
+                'stato': str(p.get('status')), 'giacenza': numero(p.get('stock_count')) or 0,
+                'foto': str(p.get('image_id') or '').strip(),
+                'upd': (p.get('update_at') or {}).get('sec') or 0,
+            }
+        if limite and len(elenco) >= limite:
+            return dict(list(elenco.items())[:limite])
+        pagina += 1
+    return elenco
 
 
 def normalizza_api(p):
-    """Record comune da un prodotto API (campi verificati il 2026-10-16 con
-    --campione). Come nel tema: «Su ordinazione» = data.unlimited, che vince
-    sulla giacenza; giorni di consegna = dimension.z; m² per confezione =
-    dimension.w."""
+    """Record da una scheda prodotto (campi verificati il 2026-10-16).
+    Come nel tema: «Su ordinazione» = data.unlimited, che vince sulla
+    giacenza; giorni di consegna = dimension.z; m² per confezione =
+    dimension.w. Nessun dato riservato (es. purchase_price) entra nello stato."""
     # la galleria può contenere voci vuote («…/gallery/» senza id)
     immagini = []
     for iid in [p.get('image_id')] + [g.get('id') if isinstance(g, dict) else g for g in p.get('gallery') or []]:
@@ -270,15 +277,13 @@ def normalizza_api(p):
         cid = c.get('category_id') if isinstance(c, dict) else c
         if cid:
             categorie.append(str(cid))
+    descrizione = testo(p.get('description'))
+    w = numero(dim.get('w'))
     return {
-        'uid': str(p.get('uid')),
         'codice': spazi(str(p.get('sku') or p.get('code') or '')),
         'titolo': spazi(p.get('title')),
-        'descrizione': p.get('description') or '',
-        'prezzo': numero(p.get('price')),
-        'prezzo_finale': numero(p.get('final_price')),
-        'visibile': str(p.get('status')) == '1' and not p.get('privateProduct'),
-        'giacenza': numero(p.get('stock_count', p.get('stockCount'))) or 0,
+        'descrizione': descrizione[:5000],
+        'privato': bool(p.get('privateProduct')),
         'illimitato': data.get('unlimited') in (True, 1, '1', 'true'),
         'giorni_consegna': numero(dim.get('z')),
         'immagini': immagini,
@@ -288,80 +293,46 @@ def normalizza_api(p):
         'mpn': spazi(data.get('mpn')),
         'peso': numero(p.get('weight')),
         # m² per confezione: dimension.w, altrimenti dalla descrizione («pacco contiene 1,9m²»)
-        'm2': (numero(dim.get('w')) if numero(dim.get('w')) and 0.05 <= numero(dim.get('w')) <= 20 else None)
-              or m2_confezione(testo(p.get('description')), p.get('title')),
-        'varianti': len(p.get('variants') or []) if str(p.get('usevariants')) == '1' else 0,
+        'm2': (w if w and 0.05 <= w <= 20 else None) or m2_confezione(descrizione, p.get('title')),
     }
 
 
-# ---------------------------------------------------------------- Clerk
-
-def carica_clerk(lingue):
-    prodotti, categorie = {}, {}
-    for l in lingue:
-        loc = LINGUE[l][0]
-        log('scarico Clerk', loc)
-        prodotti[l] = {str(x['id']): x for x in json.loads(scarica(S3 + f'products-{loc}.json'))}
-        categorie[l] = json.loads(scarica(S3 + f'categories-{loc}.json'))
-    return prodotti, categorie
+def traduzione(sd, uid, tipo, campo, locale):
+    j = sd.get('translations/translation.json', uid=uid, type=tipo, selector=campo, locale=locale)
+    return j.get('value') if isinstance(j, dict) and j.get('found') else None
 
 
-def testi_es_feed_vecchio():
-    """Riserva per lo spagnolo finché il file Clerk ES è una copia del FR:
-    titoli e descrizioni dal vecchio g-feed-es.xml di No Gravity (fermo al
-    15/07/2026). Prezzi, disponibilità e il resto arrivano comunque dalle API;
-    i prodotti creati dopo luglio non ci sono e restano fuori dal feed ES."""
-    log('scarico g-feed-es.xml (testi spagnoli di riserva)')
-    s = scarica(S3 + 'g-feed-es.xml').decode('utf-8')
+# ---------------------------------------------------------------- stato
+
+def carica_stato():
+    if os.path.exists(STATO):
+        try:
+            with gzip.open(STATO, 'rt', encoding='utf-8') as f:
+                s = json.load(f)
+            log('stato precedente:', len(s.get('prodotti', {})), 'prodotti')
+            return s
+        except Exception as e:
+            log('stato illeggibile, riparto da zero:', e)
+    return {}
+
+
+def salva_stato(s):
+    os.makedirs(os.path.dirname(STATO), exist_ok=True)
+    with gzip.open(STATO + '.tmp', 'wt', encoding='utf-8') as f:
+        json.dump(s, f, ensure_ascii=False, separators=(',', ':'))
+    os.replace(STATO + '.tmp', STATO)
+
+
+def percorsi(albero, nomi):
+    """cid → «Padre > Figlio» con i nomi della lingua (italiano se manca)."""
     out = {}
-    for it in re.findall(r'<item>(.*?)</item>', s, re.S):
-        def g(t):
-            m = re.search(r'<g:%s>(.*?)</g:%s>' % (t, t), it, re.S)
-            return html.unescape(m.group(1)) if m else ''
-        m = re.search(r'/product/(\d+)', g('link'))
-        if m and g('title'):
-            uid = m.group(1)
-            out[uid] = {'name': g('title'), 'description': g('description'),
-                        'url': LINGUE['es'][1] + '/product/' + uid}
+    for cid in albero:
+        parti, c = [], cid
+        while c in albero and len(parti) < 8:
+            parti.append(spazi(nomi.get(c) or albero[c]['nome']).rstrip('_ '))
+            c = albero[c]['padre']
+        out[cid] = ' > '.join(reversed(parti))
     return out
-
-
-def percorsi_categorie(lista):
-    per_id = {str(c['id']): c for c in lista}
-    padre = {}
-    for c in lista:
-        for s in c.get('subcategories', []):
-            padre[str(s)] = str(c['id'])
-    out = {}
-    for i in per_id:
-        nomi, j = [], i
-        while j in per_id and len(nomi) < 8:
-            nomi.append(spazi(per_id[j]['name']).rstrip('_ '))
-            j = padre.get(j)
-        out[i] = ' > '.join(reversed(nomi))
-    return out
-
-
-def normalizza_clerk(x):
-    """Record comune dal solo file Clerk (anteprima senza API). Il prezzo
-    Clerk delle piastrelle è al m²: lo riportiamo alla confezione."""
-    m2 = m2_confezione(x.get('description'), x.get('name'))
-    prezzo, listino = x.get('price') or 0, x.get('list_price') or 0
-    if x.get('sqmPrice'):
-        if not m2:
-            prezzo = listino = 0   # senza m² per confezione non sappiamo il prezzo reale
-        else:
-            prezzo, listino = prezzo * m2, listino * m2
-    return {
-        'uid': str(x['id']), 'codice': spazi(x.get('sku')), 'titolo': spazi(x.get('name')),
-        'descrizione': x.get('description') or '',
-        'prezzo': round(max(prezzo, listino), 2), 'prezzo_finale': round(prezzo, 2),
-        'visibile': bool(x.get('available')), 'giacenza': x.get('stock') or 0,
-        'illimitato': bool(x.get('available')), 'giorni_consegna': None,
-        'immagini': [] if x.get('no_image') or not x.get('image') else [x['image']],
-        'brand': x.get('brand_name'), 'categorie': [str(c) for c in x.get('categories', [])],
-        'ean': None, 'mpn': '', 'peso': None, 'm2': m2, 'varianti': 0,
-    }
 
 
 # ---------------------------------------------------------------- regole feed
@@ -369,12 +340,7 @@ def normalizza_clerk(x):
 def categoria_google(titolo_it, percorso_it):
     n, c = (titolo_it or '').lower(), (percorso_it or '').lower()
     for regola, gid in REGOLE_CATEGORIA:
-        ok = False
-        if 'nome' in regola and re.search(regola['nome'], n):
-            ok = True
-        if 'cat' in regola and re.search(regola['cat'], c):
-            ok = True
-        if ok:
+        if ('nome' in regola and re.search(regola['nome'], n)) or ('cat' in regola and re.search(regola['cat'], c)):
             return gid
     return None
 
@@ -384,35 +350,43 @@ def pulisci_brand(b):
     return '' if b.lower() in ('', 'unknown', 'none') else b
 
 
-def costruisci_item(r, l, clerk_l, percorsi_l, percorsi_it, oggi, motivi):
+def motivo_esclusione(r):
+    """Motivi validi per tutte le lingue (None = prodotto idoneo)."""
+    if not r.get('visibile'):
+        return 'nascosto o non disponibile'
+    if not r['immagini']:
+        return 'senza immagine'
+    if not (r['prezzo_finale'] or r['prezzo']) or (r['prezzo_finale'] or r['prezzo']) <= 0:
+        return 'prezzo 0 o mancante'
+    if not r['codice']:
+        return 'senza codice'
+    # campioni da 10 € (codice «…_sample»): su Shopping toglierebbero clic alla piastrella vera
+    if re.search(r'[_-]sample$', r['codice'], re.I) or re.match(r'campion[ei]\b', r['titolo'], re.I):
+        return 'campione'
+    return None
+
+
+def costruisci_item(uid, r, l, trad_l, percorsi_l, percorsi_it, oggi, motivi):
     """Ritorna (xml dell'item, dati per il rapporto) oppure None se escluso."""
     def escludi(motivo):
         motivi[motivo] = motivi.get(motivo, 0) + 1
         return None
 
-    if not r['visibile']:
-        return escludi('nascosto o non disponibile')
-    if not r['immagini']:
-        return escludi('senza immagine')
-    finale, pieno = r['prezzo_finale'] or r['prezzo'], r['prezzo'] or r['prezzo_finale']
-    if not finale or finale <= 0:
-        return escludi('prezzo 0 o mancante')
-    if not r['codice']:
-        return escludi('senza codice')
-    # campioni da 10 € (codice «…_sample»): su Shopping toglierebbero clic alla piastrella vera
-    if re.search(r'[_-]sample$', r['codice'], re.I) or re.match(r'campion[ei]\b', r['titolo'], re.I):
-        return escludi('campione')
+    m = motivo_esclusione(r)
+    if m:
+        return escludi(m)
+    if l == 'it':
+        titolo, descr = r['titolo'], r['descrizione']
+    else:
+        t = trad_l.get(uid)
+        if not t:
+            return escludi('traduzione non ancora letta')
+        if not t.get('t'):
+            return escludi('non tradotto in Storeden')
+        titolo, descr = spazi(t['t']), t.get('d') or ''
 
     _, dominio, valuta = LINGUE[l]
-    tradotto = clerk_l.get(r['uid'])
-    if l != 'it' and not tradotto:
-        return escludi('assente nel file Clerk della lingua')
-    titolo = spazi(tradotto['name']) if tradotto and l != 'it' else r['titolo']
-    descr = testo(tradotto.get('description') if tradotto and l != 'it' else r['descrizione'])
-    link = (tradotto or {}).get('url') or f"{dominio}/product/{r['uid']}"
-    if not link.startswith(dominio):
-        return escludi('link di un altro dominio nel file Clerk')
-
+    finale, pieno = r['prezzo_finale'] or r['prezzo'], r['prezzo'] or r['prezzo_finale']
     cat_id = r['categorie'][0] if r['categorie'] else None
     percorso_it = percorsi_it.get(cat_id, '') if cat_id else ''
     percorso_l = percorsi_l.get(cat_id, '') if cat_id else ''
@@ -431,7 +405,7 @@ def costruisci_item(r, l, clerk_l, percorsi_l, percorsi_it, oggi, motivi):
         ('g:id', r['codice']),
         ('g:title', titolo[:150]),
         ('g:description', (descr or titolo)[:5000]),
-        ('g:link', link),
+        ('g:link', f'{dominio}/product/{uid}'),
         ('g:image_link', r['immagini'][0]),
     ]
     c += [('g:additional_image_link', i) for i in r['immagini'][1:11]]
@@ -484,19 +458,17 @@ def scrivi_feed(l, items):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--solo-clerk', action='store_true', help='anteprima senza API Storeden')
     ap.add_argument('--campione', action='store_true', help='salva il JSON di un prodotto API ed esce')
-    ap.add_argument('--limite', type=int, default=0, help='solo i primi N prodotti')
+    ap.add_argument('--limite', type=int, default=0, help='solo i primi N prodotti (prova)')
     ap.add_argument('--lingue', default='it,en,de,es,fr')
-    ap.add_argument('--da-cache', action='store_true', help="usa out/grezzi.json.gz dell'ultimo giro API")
     a = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
     lingue = [l.strip() for l in a.lingue.split(',') if l.strip() in LINGUE]
     inizio = time.time()
+    sd = Storeden()
 
     if a.campione:
-        sd = Storeden()
-        uid = uid_da_api(sd, 1)[0]
+        uid = next(iter(leggi_elenco(sd, 1)))
         p = sd.get('products/product.json', uid=uid, nodes='categories_name,brand_name,gallery')
         f = os.path.join(OUT, 'campione-prodotto.json')
         json.dump(p, open(f, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
@@ -504,50 +476,94 @@ def main():
         log('normalizzato:', json.dumps(normalizza_api(p), ensure_ascii=False)[:1500])
         return
 
-    # il francese serve anche per riconoscere il file ES copiato dal FR
-    clerk, cat_clerk = carica_clerk(sorted(set(lingue) | {'it'} | ({'fr'} if 'es' in lingue else set())))
-    percorsi = {l: percorsi_categorie(cat_clerk[l]) for l in cat_clerk}
-
     rapporto = {'generato': datetime.datetime.now().isoformat(timespec='seconds'),
-                'fonte': 'solo Clerk (anteprima)' if a.solo_clerk else 'API Storeden + Clerk',
-                'lingue': {}, 'avvisi': []}
+                'fonte': 'API Storeden', 'lingue': {}, 'avvisi': []}
+    stato = carica_stato()
+    prodotti = stato.setdefault('prodotti', {})
+    trad = stato.setdefault('traduzioni', {})
+    cat = stato.setdefault('categorie', {})
 
-    # file Clerk ES identico a FR: non pubblicare un feed spagnolo in francese
-    if 'es' in clerk and 'fr' in clerk:
-        campione = list(clerk['es'])[:500]
-        uguali = sum(1 for u in campione if u in clerk['fr'] and clerk['es'][u]['name'] == clerk['fr'][u]['name'])
-        if campione and uguali / len(campione) > 0.9:
-            clerk['es'] = testi_es_feed_vecchio()
-            rapporto['avvisi'].append('File Clerk ES identico a FR: testi spagnoli presi dal vecchio '
-                                      f'g-feed-es.xml di luglio ({len(clerk["es"])} prodotti).')
+    # 1) elenco completo: prezzi, giacenze, stato, foto, data di modifica
+    elenco = leggi_elenco(sd, a.limite)
+    log('prodotti in Storeden:', len(elenco), '- chiamate', sd.chiamate)
+    # solo i prodotti attivi e con foto possono finire nel feed
+    candidati = [u for u, e in elenco.items() if e['stato'] == '1' and e['foto']]
+    if not a.limite:
+        tenere = set(candidati)
+        for u in list(prodotti):
+            if u not in tenere:
+                prodotti.pop(u)
+                for l in trad.values():
+                    l.pop(u, None)
 
-    cache = os.path.join(OUT, 'grezzi.json.gz')
-    if a.solo_clerk:
-        record = [normalizza_clerk(x) for x in clerk['it'].values()]
-        if a.limite:
-            record = record[:a.limite]
-    elif a.da_cache:
-        rapporto['fonte'] = 'cache API ' + time.strftime('%Y-%m-%d %H:%M', time.localtime(os.path.getmtime(cache))) + ' + Clerk'
-        record = [normalizza_api(p) for p in json.load(gzip.open(cache, 'rt', encoding='utf-8')).values()]
-    else:
-        sd = Storeden()
-        uids = uid_da_api(sd, a.limite)
-        log('prodotti in Storeden:', len(uids))
-        grezzi, errori = prodotti_da_api(sd, uids)
-        if errori:
-            rapporto['avvisi'].append(f'{len(errori)} prodotti non letti dalle API, es. {errori[:3]}')
-        if len(errori) > len(uids) * 0.05:
-            sys.exit(f'Troppi errori API ({len(errori)}): feed non aggiornato.')
-        if not a.limite:
-            with gzip.open(cache, 'wt', encoding='utf-8') as f:
-                json.dump(grezzi, f, ensure_ascii=False)
-        record = [normalizza_api(p) for p in grezzi.values()]
-        rapporto['chiamate_api'] = sd.chiamate
-        rapporto['prodotti_con_varianti'] = sum(1 for r in record if r['varianti'])
+    # 2) categorie: albero e nomi tradotti, riletti una volta a settimana
+    if not cat.get('albero') or time.time() - cat.get('letto', 0) > GIORNI_CATEGORIE * 86400:
+        lista = sd.get('categories/list.json')
+        cat.update(albero={str(c['uid']): {'nome': c['name'], 'padre': str(c.get('parent') or c.get('parentUID') or 0)} for c in lista},
+                   nomi={}, letto=time.time())
+    nomi = cat.setdefault('nomi', {})
+    compiti = [(l, cid) for l in ORDINE_TRADUZIONI if l in lingue for cid in cat['albero'] if cid not in nomi.get(l, {})]
 
-    # stesso codice su più prodotti: Google vuole id unici
+    def leggi_nome(c):
+        l, cid = c
+        v = traduzione(sd, cid, 'category', 'title', LINGUE[l][0])
+        nomi.setdefault(l, {})[cid] = spazi(v) if v else ''
+    in_parallelo(sd, compiti, leggi_nome, 'nomi categorie')
+
+    # 3) schede complete solo per i prodotti nuovi o modificati (i nuovi prima)
+    da_leggere = sorted((u for u in candidati if prodotti.get(u, {}).get('upd') != elenco[u]['upd']),
+                        key=lambda u: u in prodotti)
+    log('schede da leggere:', len(da_leggere))
+
+    def leggi_scheda(u):
+        p = sd.get('products/product.json', uid=u, nodes='categories_name,brand_name,gallery')
+        r = normalizza_api(p)
+        r['upd'] = elenco[u]['upd']
+        prodotti[u] = r
+    letti, errori = in_parallelo(sd, da_leggere, leggi_scheda, 'schede')
+    rapporto['schede_lette'] = letti
+    if errori:
+        rapporto['avvisi'].append(f'{len(errori)} schede non lette, es. {errori[:3]}')
+    if len(errori) > max(50, (letti + len(errori)) * 0.05):
+        sys.exit(f'Troppi errori API ({len(errori)}): feed non aggiornato.')
+
+    # dati che cambiano spesso: sempre dall'elenco di stanotte
+    for u, r in prodotti.items():
+        e = elenco.get(u)
+        if e:
+            r.update(prezzo=e['prezzo'], prezzo_finale=e['prezzo_finale'], giacenza=e['giacenza'],
+                     visibile=e['stato'] == '1' and not r.get('privato'))
+
+    # 4) traduzioni dei prodotti idonei, nuove o con scheda cambiata
+    idonei = [u for u, r in prodotti.items() if not motivo_esclusione(r)]
+    rapporto['traduzioni_lette'] = {}
+    for l in ORDINE_TRADUZIONI:
+        if l not in lingue:
+            continue
+        tl = trad.setdefault(l, {})
+        compiti = [u for u in idonei if tl.get(u, {}).get('upd') != prodotti[u]['upd']]
+
+        def leggi_traduzione(u, l=l, tl=tl):
+            loc = LINGUE[l][0]
+            t = traduzione(sd, u, 'product', 'title', loc)
+            d = traduzione(sd, u, 'product', 'description', loc) if t else None
+            tl[u] = {'t': spazi(t) if t else '', 'd': testo(d)[:5000] if d else '', 'upd': prodotti[u]['upd']}
+        fatti, err = in_parallelo(sd, compiti, leggi_traduzione, f'traduzioni {l}')
+        rapporto['traduzioni_lette'][l] = fatti
+        if err:
+            rapporto['avvisi'].append(f'{len(err)} traduzioni {l} non lette, es. {err[:2]}')
+
+    if sd.fermo:
+        rapporto['avvisi'].append(f'Letture interrotte: {sd.fermo}. Il resto si completa nei prossimi giri.')
+    if not a.limite:
+        salva_stato(stato)
+    rapporto['chiamate_api'] = sd.chiamate
+
+    # 5) feed per lingua
+    albero = cat['albero']
+    percorsi_it = percorsi(albero, {})
     visti, doppi = set(), set()
-    for r in record:
+    for r in prodotti.values():
         (doppi if r['codice'] in visti else visti).add(r['codice'])
     if doppi:
         rapporto['avvisi'].append(f'{len(doppi)} codici usati da più prodotti (tenuto il primo), es. {sorted(doppi)[:5]}')
@@ -555,19 +571,20 @@ def main():
     oggi = datetime.date.today()
     for l in lingue:
         items, motivi, stat, usati = [], {}, [], set()
-        for r in record:
+        percorsi_l = percorsi_it if l == 'it' else percorsi(albero, nomi.get(l, {}))
+        for u, r in prodotti.items():
             if r['codice'] in usati:
                 motivi['codice doppio'] = motivi.get('codice doppio', 0) + 1
                 continue
-            res = costruisci_item(r, l, clerk.get(l, {}), percorsi.get(l, {}), percorsi['it'], oggi, motivi)
+            res = costruisci_item(u, r, l, trad.get(l, {}), percorsi_l, percorsi_it, oggi, motivi)
             if res:
                 usati.add(r['codice'])
                 items.append(res[0])
                 stat.append(res[1])
-        f = scrivi_feed(l, items)
+        scrivi_feed(l, items)
         n = len(stat) or 1
         rapporto['lingue'][l] = {
-            'file': os.path.basename(f), 'prodotti': len(items), 'esclusi': motivi,
+            'file': f'feed-{l}.xml', 'prodotti': len(items), 'esclusi': motivi,
             'disponibilita': {d: sum(1 for s in stat if s['disp'] == d) for d in ('in_stock', 'backorder', 'out_of_stock')},
             'con_categoria_google_%': round(100 * sum(1 for s in stat if s['gcat']) / n, 1),
             'con_ean_%': round(100 * sum(1 for s in stat if s['ean']) / n, 1),
@@ -580,9 +597,10 @@ def main():
     json.dump(rapporto, open(os.path.join(OUT, 'rapporto.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
     righe = ''.join(f'<li><a href="feed-{l}.xml">feed-{l}.xml</a> — {v["prodotti"]} prodotti</li>' for l, v in rapporto['lingue'].items())
     open(os.path.join(OUT, 'index.html'), 'w', encoding='utf-8').write(
-        f'<!doctype html><meta charset="utf-8"><title>Feed UC</title><h1>Feed Universo Ceramiche</h1>'
-        f'<meta name="robots" content="noindex"><p>Generato {rapporto["generato"]}</p><ul>{righe}</ul><p><a href="rapporto.json">rapporto.json</a></p>')
-    log('fatto in', rapporto['durata_minuti'], 'minuti')
+        '<!doctype html><meta charset="utf-8"><meta name="robots" content="noindex"><title>Feed UC</title>'
+        f'<h1>Feed Universo Ceramiche</h1><p>Generato {rapporto["generato"]}</p><ul>{righe}</ul>'
+        '<p><a href="rapporto.json">rapporto.json</a></p>')
+    log('fatto in', rapporto['durata_minuti'], 'minuti, chiamate', sd.chiamate)
 
 
 if __name__ == '__main__':

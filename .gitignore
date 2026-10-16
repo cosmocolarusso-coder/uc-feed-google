@@ -1,4 +1,5 @@
 .chiave-storeden.txt
 out/
+stato/
 __pycache__/
 .DS_Store
