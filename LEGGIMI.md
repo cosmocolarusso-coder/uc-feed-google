@@ -9,7 +9,7 @@ Sostituisce i `g-feed-*.xml` di No Gravity, fermi dal 15 luglio 2026.
 
 ## Regole principali
 - L'ID è il codice prodotto, lo stesso usato dal pixel Meta e da Google Ads.
-- Escluso ogni prodotto nascosto, senza immagine, con prezzo 0, senza codice o con codice doppio.
+- Escluso ogni prodotto nascosto, senza immagine, con prezzo 0, senza codice, con codice doppio o campione (codice «…_sample»).
 - Disponibilità:
   - `in_stock` se c'è giacenza;
   - `backorder` con data di disponibilità se si vende su ordinazione (giorni presi da packageTime, altrimenti 14);

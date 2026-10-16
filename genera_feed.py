@@ -379,6 +379,9 @@ def costruisci_item(r, l, clerk_l, percorsi_l, percorsi_it, oggi, motivi):
         return escludi('prezzo 0 o mancante')
     if not r['codice']:
         return escludi('senza codice')
+    # campioni da 10 € (codice «…_sample»): su Shopping toglierebbero clic alla piastrella vera
+    if re.search(r'[_-]sample$', r['codice'], re.I) or re.match(r'campion[ei]\b', r['titolo'], re.I):
+        return escludi('campione')
 
     _, dominio, valuta = LINGUE[l]
     tradotto = clerk_l.get(r['uid'])
