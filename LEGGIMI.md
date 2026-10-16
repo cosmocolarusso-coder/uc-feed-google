@@ -16,7 +16,7 @@ Sostituisce i `g-feed-*.xml` di No Gravity, fermi dal 15 luglio 2026.
   - `out_of_stock` negli altri casi.
 - Categoria Google ufficiale secondo `REGOLE_CATEGORIA` in `genera_feed.py`; le vostre categorie vanno in `product_type`.
 - Piastrelle: `unit_pricing_measure` è la quantità in m² contenuta nella confezione.
-- Il feed spagnolo non viene generato finché il file Clerk ES è una copia di quello francese.
+- Finché il file Clerk ES è una copia di quello francese, i testi spagnoli si prendono dal vecchio `g-feed-es.xml` di No Gravity (fermo al 15/07/2026). I prodotti creati dopo luglio restano fuori dal feed ES.
 
 ## Comandi
 ```

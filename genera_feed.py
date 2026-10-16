@@ -306,6 +306,26 @@ def carica_clerk(lingue):
     return prodotti, categorie
 
 
+def testi_es_feed_vecchio():
+    """Riserva per lo spagnolo finché il file Clerk ES è una copia del FR:
+    titoli e descrizioni dal vecchio g-feed-es.xml di No Gravity (fermo al
+    15/07/2026). Prezzi, disponibilità e il resto arrivano comunque dalle API;
+    i prodotti creati dopo luglio non ci sono e restano fuori dal feed ES."""
+    log('scarico g-feed-es.xml (testi spagnoli di riserva)')
+    s = scarica(S3 + 'g-feed-es.xml').decode('utf-8')
+    out = {}
+    for it in re.findall(r'<item>(.*?)</item>', s, re.S):
+        def g(t):
+            m = re.search(r'<g:%s>(.*?)</g:%s>' % (t, t), it, re.S)
+            return html.unescape(m.group(1)) if m else ''
+        m = re.search(r'/product/(\d+)', g('link'))
+        if m and g('title'):
+            uid = m.group(1)
+            out[uid] = {'name': g('title'), 'description': g('description'),
+                        'url': LINGUE['es'][1] + '/product/' + uid}
+    return out
+
+
 def percorsi_categorie(lista):
     per_id = {str(c['id']): c for c in lista}
     padre = {}
@@ -484,7 +504,8 @@ def main():
         log('normalizzato:', json.dumps(normalizza_api(p), ensure_ascii=False)[:1500])
         return
 
-    clerk, cat_clerk = carica_clerk(sorted(set(lingue) | {'it'}))
+    # il francese serve anche per riconoscere il file ES copiato dal FR
+    clerk, cat_clerk = carica_clerk(sorted(set(lingue) | {'it'} | ({'fr'} if 'es' in lingue else set())))
     percorsi = {l: percorsi_categorie(cat_clerk[l]) for l in cat_clerk}
 
     rapporto = {'generato': datetime.datetime.now().isoformat(timespec='seconds'),
@@ -496,8 +517,9 @@ def main():
         campione = list(clerk['es'])[:500]
         uguali = sum(1 for u in campione if u in clerk['fr'] and clerk['es'][u]['name'] == clerk['fr'][u]['name'])
         if campione and uguali / len(campione) > 0.9:
-            rapporto['avvisi'].append('File Clerk ES identico a FR: feed ES non generato.')
-            lingue = [l for l in lingue if l != 'es']
+            clerk['es'] = testi_es_feed_vecchio()
+            rapporto['avvisi'].append('File Clerk ES identico a FR: testi spagnoli presi dal vecchio '
+                                      f'g-feed-es.xml di luglio ({len(clerk["es"])} prodotti).')
 
     cache = os.path.join(OUT, 'grezzi.json.gz')
     if a.solo_clerk:
