@@ -22,7 +22,10 @@ Chiave API: variabili d'ambiente STOREDEN_KEY e STOREDEN_EXCHANGE, oppure il
 file .chiave-storeden.txt accanto allo script con le righe «key: ...» e
 «exchange: ...». Basta una chiave di sola lettura.
 
-Uscita: out/feed-<lingua>.xml, out/rapporto.json, out/index.html (pubblicati)
+Uscita: out/feed-<lingua>.xml               feed Google Merchant Center
+        out/clerk/products-<locale>.json     feed Clerk.io (JSON Feed V2), stessi
+        out/clerk/categories-<locale>.json   campi del file di No Gravity
+        out/rapporto.json, out/index.html    (tutto in out/ è pubblicato)
         stato/stato.json.gz (NON pubblicato: contiene le giacenze esatte)
 """
 import argparse, datetime, gzip, html, json, os, queue, re, ssl, sys, threading, time
@@ -34,6 +37,7 @@ OUT = os.path.join(QUI, 'out')
 STATO = os.path.join(QUI, 'stato', 'stato.json.gz')
 API = 'https://connect.storeden.com/v1.1/'
 IMG = 'https://egress.storeden.net/gallery/'
+SEGNAPOSTO = IMG + '67448c93202628c07df34a63'   # immagine «senza foto» usata da Clerk
 
 LINGUE = {
     # lingua: (locale Storeden, dominio, valuta)
@@ -277,12 +281,13 @@ def normalizza_api(p):
         cid = c.get('category_id') if isinstance(c, dict) else c
         if cid:
             categorie.append(str(cid))
-    descrizione = testo(p.get('description'))
+    html_descr = p.get('description') or ''
     w = numero(dim.get('w'))
     return {
         'codice': spazi(str(p.get('sku') or p.get('code') or '')),
         'titolo': spazi(p.get('title')),
-        'descrizione': descrizione[:5000],
+        'titolo_originale': p.get('title') or '',   # con gli spazi doppi, come lo vuole Clerk
+        'descrizione': html_descr[:20000],     # HTML originale (Clerk lo vuole così)
         'privato': bool(p.get('privateProduct')),
         'illimitato': data.get('unlimited') in (True, 1, '1', 'true'),
         'giorni_consegna': numero(dim.get('z')),
@@ -292,8 +297,10 @@ def normalizza_api(p):
         'ean': ean_valido(data.get('ean13')),
         'mpn': spazi(data.get('mpn')),
         'peso': numero(p.get('weight')),
+        'spedizione_gratuita': numero(p.get('shipping_cost')) == -1,
+        'w': w or 0, 'h': numero(dim.get('h')) or 0,
         # m² per confezione: dimension.w, altrimenti dalla descrizione («pacco contiene 1,9m²»)
-        'm2': (w if w and 0.05 <= w <= 20 else None) or m2_confezione(descrizione, p.get('title')),
+        'm2': (w if w and 0.05 <= w <= 20 else None) or m2_confezione(testo(html_descr), p.get('title')),
     }
 
 
@@ -366,6 +373,68 @@ def motivo_esclusione(r):
     return None
 
 
+def da_clerk(r):
+    """Prodotti nel feed Clerk: attivi, con codice, non campioni (come No Gravity)."""
+    return r.get('visibile') and r['codice'] and not (
+        re.search(r'[_-]sample$', r['codice'], re.I) or re.match(r'campion[ei]\b', r['titolo'], re.I))
+
+
+def scrivi_clerk(l, prodotti, trad_l, cat, rapporto):
+    """Clerk.io JSON Feed V2 con gli stessi campi e significati del file di
+    No Gravity, su cui si basano modificatori, campagne e design di Clerk:
+    - piastrelle (dimension.w > 0): price e list_price al m², sqmPrice al m²;
+      confezioni grandi (dimension.h = 2): price della confezione, sqmPrice al m²
+    - brand_name come in Storeden, compreso il «_» finale (es. GESSI_)
+    - no_image con l'immagine segnaposto; available = su ordinazione o giacenza
+    - description: HTML italiano in tutte le lingue, come No Gravity: i
+      modificatori AI di Clerk (Marazzi, Ragno, Piemme…) leggono quel testo
+    - brand vuoto = «Unknown»
+    Nelle lingue estere il nome è tradotto; se manca la traduzione resta l'italiano."""
+    loc, dominio, _ = LINGUE[l]
+    out, in_italiano = [], 0
+    for u, r in prodotti.items():
+        if not da_clerk(r):
+            continue
+        t = trad_l.get(u) or {}
+        if l != 'it' and not t.get('t'):
+            in_italiano += 1
+        nome = t.get('t') if l != 'it' and t.get('t') else r.get('titolo_originale') or r['titolo']
+        finale = r['prezzo_finale'] or r['prezzo'] or 0
+        pieno = r['prezzo'] or finale
+        w, h = r.get('w') or 0, r.get('h') or 0
+        if w > 0:
+            mq = finale / w
+            prezzo, listino = (finale, pieno) if h == 2 else (finale / w, pieno / w)
+        else:
+            mq, prezzo, listino = 0, finale, pieno
+        out.append({
+            'id': int(u), 'name': nome, 'description': r['descrizione'], 'price': prezzo, 'list_price': listino,
+            'image': r['immagini'][0] if r['immagini'] else SEGNAPOSTO,
+            'url': f'{dominio}/product/{u}', 'categories': [int(c) for c in r['categorie']],
+            'created_at': r.get('visto') or 0, 'sku': r['codice'], 'stock': int(r['giacenza']),
+            'free_shipping': bool(r.get('spedizione_gratuita')), 'brand_name': r['brand'] or 'Unknown',
+            'no_image': not r['immagini'], 'available': bool(r['illimitato'] or r['giacenza'] > 0),
+            'sqmPrice': round(mq, 2),
+        })
+    figli = {}
+    for cid, c in cat['albero'].items():
+        figli.setdefault(c['padre'], []).append(int(cid))
+    nomi, descr = cat.get('nomi', {}).get(l, {}), cat.get('descrizioni', {}).get(l, {})
+    categorie = [{'id': int(cid), 'name': (nomi.get(cid) if l != 'it' else '') or c['nome'],
+                  'description': (descr.get(cid) if l != 'it' else '') or c['descrizione'],
+                  'url': f'{dominio}/shop/category/{cid}', 'subcategories': figli.get(cid, [])}
+                 for cid, c in cat['albero'].items() if not c['disattivata']]
+    os.makedirs(os.path.join(OUT, 'clerk'), exist_ok=True)
+    for nome_file, dati in ((f'products-{loc}.json', out), (f'categories-{loc}.json', categorie)):
+        f = os.path.join(OUT, 'clerk', nome_file)
+        with open(f + '.tmp', 'w', encoding='utf-8') as fh:
+            json.dump(dati, fh, ensure_ascii=False, separators=(',', ':'))
+        os.replace(f + '.tmp', f)
+    rapporto.setdefault('clerk', {})[l] = {'prodotti': len(out), 'categorie': len(categorie),
+                                           'testo_italiano_per_traduzione_mancante': in_italiano if l != 'it' else 0}
+    log('clerk', loc, len(out), 'prodotti,', len(categorie), 'categorie')
+
+
 def costruisci_item(uid, r, l, trad_l, percorsi_l, percorsi_it, oggi, motivi):
     """Ritorna (xml dell'item, dati per il rapporto) oppure None se escluso."""
     def escludi(motivo):
@@ -376,7 +445,7 @@ def costruisci_item(uid, r, l, trad_l, percorsi_l, percorsi_it, oggi, motivi):
     if m:
         return escludi(m)
     if l == 'it':
-        titolo, descr = r['titolo'], r['descrizione']
+        titolo, descr = r['titolo'], testo(r['descrizione'])
     else:
         t = trad_l.get(uid)
         if not t:
@@ -486,8 +555,8 @@ def main():
     # 1) elenco completo: prezzi, giacenze, stato, foto, data di modifica
     elenco = leggi_elenco(sd, a.limite)
     log('prodotti in Storeden:', len(elenco), '- chiamate', sd.chiamate)
-    # solo i prodotti attivi e con foto possono finire nel feed
-    candidati = [u for u, e in elenco.items() if e['stato'] == '1' and e['foto']]
+    # prodotti attivi: con foto vanno su Google e Clerk, senza foto solo su Clerk
+    candidati = [u for u, e in elenco.items() if e['stato'] == '1']
     if not a.limite:
         tenere = set(candidati)
         for u in list(prodotti):
@@ -499,26 +568,33 @@ def main():
     # 2) categorie: albero e nomi tradotti, riletti una volta a settimana
     if not cat.get('albero') or time.time() - cat.get('letto', 0) > GIORNI_CATEGORIE * 86400:
         lista = sd.get('categories/list.json')
-        cat.update(albero={str(c['uid']): {'nome': c['name'], 'padre': str(c.get('parent') or c.get('parentUID') or 0)} for c in lista},
-                   nomi={}, letto=time.time())
+        cat.update(albero={str(c['uid']): {'nome': c['name'], 'padre': str(c.get('parentUID') or c.get('parent') or 0),
+                                           'descrizione': c.get('description') or '', 'disattivata': bool(c.get('disabled'))}
+                           for c in lista},
+                   nomi={}, descrizioni={}, letto=time.time())
     nomi = cat.setdefault('nomi', {})
+    descrizioni = cat.setdefault('descrizioni', {})
     compiti = [(l, cid) for l in ORDINE_TRADUZIONI if l in lingue for cid in cat['albero'] if cid not in nomi.get(l, {})]
 
     def leggi_nome(c):
         l, cid = c
-        v = traduzione(sd, cid, 'category', 'title', LINGUE[l][0])
+        loc = LINGUE[l][0]
+        v = traduzione(sd, cid, 'category', 'title', loc)
+        d = traduzione(sd, cid, 'category', 'description', loc) if v else None
+        descrizioni.setdefault(l, {})[cid] = d or ''
         nomi.setdefault(l, {})[cid] = spazi(v) if v else ''
-    in_parallelo(sd, compiti, leggi_nome, 'nomi categorie')
+    in_parallelo(sd, compiti, leggi_nome, 'categorie tradotte')
 
     # 3) schede complete solo per i prodotti nuovi o modificati (i nuovi prima)
     da_leggere = sorted((u for u in candidati if prodotti.get(u, {}).get('upd') != elenco[u]['upd']),
-                        key=lambda u: u in prodotti)
+                        key=lambda u: (u in prodotti, not elenco[u]['foto']))
     log('schede da leggere:', len(da_leggere))
 
     def leggi_scheda(u):
         p = sd.get('products/product.json', uid=u, nodes='categories_name,brand_name,gallery')
         r = normalizza_api(p)
         r['upd'] = elenco[u]['upd']
+        r['visto'] = prodotti.get(u, {}).get('visto') or int(time.time())   # prima volta visto (created_at Clerk)
         prodotti[u] = r
     letti, errori = in_parallelo(sd, da_leggere, leggi_scheda, 'schede')
     rapporto['schede_lette'] = letti
@@ -535,7 +611,7 @@ def main():
                      visibile=e['stato'] == '1' and not r.get('privato'))
 
     # 4) traduzioni dei prodotti idonei, nuove o con scheda cambiata
-    idonei = [u for u, r in prodotti.items() if not motivo_esclusione(r)]
+    idonei = sorted((u for u, r in prodotti.items() if da_clerk(r)), key=lambda u: bool(motivo_esclusione(prodotti[u])))
     rapporto['traduzioni_lette'] = {}
     for l in ORDINE_TRADUZIONI:
         if l not in lingue:
@@ -547,7 +623,7 @@ def main():
             loc = LINGUE[l][0]
             t = traduzione(sd, u, 'product', 'title', loc)
             d = traduzione(sd, u, 'product', 'description', loc) if t else None
-            tl[u] = {'t': spazi(t) if t else '', 'd': testo(d)[:5000] if d else '', 'upd': prodotti[u]['upd']}
+            tl[u] = {'t': spazi(t) if t else '', 'd': testo(d)[:5000] if d else '', 'upd': prodotti[u]['upd']}   # solo per Google
         fatti, err = in_parallelo(sd, compiti, leggi_traduzione, f'traduzioni {l}')
         rapporto['traduzioni_lette'][l] = fatti
         if err:
@@ -592,10 +668,13 @@ def main():
             'con_peso_%': round(100 * sum(1 for s in stat if s['peso']) / n, 1),
         }
         log(l, len(items), 'prodotti; esclusi', motivi)
+        scrivi_clerk(l, prodotti, trad.get(l, {}), cat, rapporto)
 
     rapporto['durata_minuti'] = round((time.time() - inizio) / 60, 1)
     json.dump(rapporto, open(os.path.join(OUT, 'rapporto.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
-    righe = ''.join(f'<li><a href="feed-{l}.xml">feed-{l}.xml</a> — {v["prodotti"]} prodotti</li>' for l, v in rapporto['lingue'].items())
+    righe = ''.join(f'<li><a href="feed-{l}.xml">feed-{l}.xml</a> — {v["prodotti"]} prodotti · Clerk: '
+                    f'<a href="clerk/products-{LINGUE[l][0]}.json">prodotti</a>, <a href="clerk/categories-{LINGUE[l][0]}.json">categorie</a></li>'
+                    for l, v in rapporto['lingue'].items())
     open(os.path.join(OUT, 'index.html'), 'w', encoding='utf-8').write(
         '<!doctype html><meta charset="utf-8"><meta name="robots" content="noindex"><title>Feed UC</title>'
         f'<h1>Feed Universo Ceramiche</h1><p>Generato {rapporto["generato"]}</p><ul>{righe}</ul>'
