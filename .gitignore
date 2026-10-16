@@ -1,0 +1,4 @@
+.chiave-storeden.txt
+out/
+__pycache__/
+.DS_Store

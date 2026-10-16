@@ -1,0 +1,38 @@
+name: Feed Google notturno
+
+on:
+  schedule:
+    - cron: '30 1 * * *'   # 01:30 UTC = 03:30 in Italia (02:30 con l'ora solare); i file Clerk sono pronti alle 01:00 UTC
+  workflow_dispatch:        # avvio manuale dalla scheda Actions
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: feed
+  cancel-in-progress: false
+
+jobs:
+  genera:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Genera i feed
+        env:
+          STOREDEN_KEY: ${{ secrets.STOREDEN_KEY }}
+          STOREDEN_EXCHANGE: ${{ secrets.STOREDEN_EXCHANGE }}
+        run: python3 -I genera_feed.py
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+      - id: deploy
+        uses: actions/deploy-pages@v4
