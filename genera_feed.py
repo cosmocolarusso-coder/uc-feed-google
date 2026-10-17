@@ -610,24 +610,34 @@ def main():
             r.update(prezzo=e['prezzo'], prezzo_finale=e['prezzo_finale'], giacenza=e['giacenza'],
                      visibile=e['stato'] == '1' and not r.get('privato'))
 
-    # 4) traduzioni dei prodotti idonei, nuove o con scheda cambiata
-    idonei = sorted((u for u, r in prodotti.items() if da_clerk(r)), key=lambda u: bool(motivo_esclusione(prodotti[u])))
-    rapporto['traduzioni_lette'] = {}
-    for l in ORDINE_TRADUZIONI:
-        if l not in lingue:
-            continue
-        tl = trad.setdefault(l, {})
-        compiti = [u for u in idonei if tl.get(u, {}).get('upd') != prodotti[u]['upd']]
+    # 4) traduzioni dei prodotti nuovi o con scheda cambiata. Ordine: prima i
+    #    prodotti per Google in tutte le lingue (titolo + descrizione), poi
+    #    quelli solo per Clerk (solo titolo: Clerk usa la descrizione italiana)
+    lingue_tr = [l for l in ORDINE_TRADUZIONI if l in lingue]
+    compiti = []
+    for per_google in (True, False):
+        for l in lingue_tr:
+            tl = trad.setdefault(l, {})
+            compiti += [(l, u, per_google) for u, r in prodotti.items()
+                        if da_clerk(r) and (not motivo_esclusione(r)) == per_google
+                        and tl.get(u, {}).get('upd') != r['upd']]
+    log('traduzioni da leggere:', len(compiti))
+    contatori = {l: 0 for l in lingue_tr}
+    lock_tr = threading.Lock()
 
-        def leggi_traduzione(u, l=l, tl=tl):
-            loc = LINGUE[l][0]
-            t = traduzione(sd, u, 'product', 'title', loc)
-            d = traduzione(sd, u, 'product', 'description', loc) if t else None
-            tl[u] = {'t': spazi(t) if t else '', 'd': testo(d)[:5000] if d else '', 'upd': prodotti[u]['upd']}   # solo per Google
-        fatti, err = in_parallelo(sd, compiti, leggi_traduzione, f'traduzioni {l}')
-        rapporto['traduzioni_lette'][l] = fatti
-        if err:
-            rapporto['avvisi'].append(f'{len(err)} traduzioni {l} non lette, es. {err[:2]}')
+    def leggi_traduzione(c):
+        l, u, per_google = c
+        loc = LINGUE[l][0]
+        t = traduzione(sd, u, 'product', 'title', loc)
+        d = traduzione(sd, u, 'product', 'description', loc) if t and per_google else None
+        trad[l][u] = {'t': spazi(t) if t else '', 'd': testo(d)[:5000] if d else '', 'upd': prodotti[u]['upd']}   # d solo per Google
+        with lock_tr:
+            contatori[l] += 1
+    fatti, err = in_parallelo(sd, compiti, leggi_traduzione, 'traduzioni')
+    rapporto['traduzioni_lette'] = contatori
+    rapporto['traduzioni_mancanti'] = len(compiti) - fatti
+    if err:
+        rapporto['avvisi'].append(f'{len(err)} traduzioni non lette, es. {err[:2]}')
 
     if sd.fermo:
         rapporto['avvisi'].append(f'Letture interrotte: {sd.fermo}. Il resto si completa nei prossimi giri.')
