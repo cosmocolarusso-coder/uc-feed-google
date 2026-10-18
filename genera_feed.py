@@ -54,6 +54,12 @@ GIORNI_SU_ORDINAZIONE = 14     # se il prodotto non indica i giorni di consegna
 GIORNI_CATEGORIE = 7           # ogni quanto rileggere albero e nomi delle categorie
 GIORNI_TRADUZIONI = 30         # ogni quanto rileggere comunque una traduzione (correzioni fatte in Storeden)
 THREAD_API = 6
+PASSAGGI_ELENCO = 2            # letture dell'elenco unite (paginated_list salta qualche prodotto)
+MAX_RICONTROLLI = 3000         # prodotti assenti dall'elenco ricontrollati con la scheda, per giro
+# Cambi fatti via API che non toccano update_at (es. PUT products/category.json,
+# CHG-427 del tema) non farebbero mai rileggere la scheda: ogni giro si rileggono
+# anche le schede lette da più tempo, fino a ROTAZIONE_SCHEDE.
+ROTAZIONE_SCHEDE = int(os.environ.get('ROTAZIONE_SCHEDE', 5000))
 
 # Categoria Google (tassonomia ufficiale). Le regole sono provate in ordine:
 # la prima che corrisponde vince. «nome» cerca nel titolo italiano,
@@ -244,24 +250,78 @@ def in_parallelo(sd, compiti, funzione, nome):
     return fatti[0], errori
 
 
+def base_da_api(p):
+    """Dati base di un prodotto (stessi campi da paginated_list e product.json)."""
+    return {
+        'prezzo': numero(p.get('price')), 'prezzo_finale': numero(p.get('final_price')),
+        'stato': str(p.get('status')), 'giacenza': numero(p.get('stock_count')) or 0,
+        'foto': str(p.get('image_id') or '').strip(),
+        'upd': (p.get('update_at') or {}).get('sec') or 0,
+    }
+
+
 def leggi_elenco(sd, limite):
-    """uid → dati base sempre freschi (una chiamata ogni 500 prodotti)."""
-    elenco, pagina, pagine = {}, 1, 1
-    while pagina <= pagine:
-        j = sd.get('products/paginated_list.json', page=pagina, limit=500,
-                   nodes='update_at,stock_count,image_id')
-        pagine = j.get('total_pages') or 1
-        for p in j.get('products', []):
-            elenco[str(p['uid'])] = {
-                'prezzo': numero(p.get('price')), 'prezzo_finale': numero(p.get('final_price')),
-                'stato': str(p.get('status')), 'giacenza': numero(p.get('stock_count')) or 0,
-                'foto': str(p.get('image_id') or '').strip(),
-                'upd': (p.get('update_at') or {}).get('sec') or 0,
-            }
-        if limite and len(elenco) >= limite:
-            return dict(list(elenco.items())[:limite])
-        pagina += 1
+    """uid → dati base sempre freschi (una chiamata ogni 500 prodotti).
+    paginated_list salta ogni tanto qualche prodotto (l'elenco si sposta
+    mentre lo si scorre: 2026-10-18 mancavano 34 prodotti in vendita), quindi
+    lo si legge due volte e si uniscono i risultati (~150 chiamate in più)."""
+    elenco = {}
+    for giro in range(1 if limite else PASSAGGI_ELENCO):
+        pagina, pagine, prima = 1, 1, len(elenco)
+        while pagina <= pagine:
+            j = sd.get('products/paginated_list.json', page=pagina, limit=500,
+                       nodes='update_at,stock_count,image_id')
+            pagine = j.get('total_pages') or 1
+            for p in j.get('products', []):
+                elenco[str(p['uid'])] = base_da_api(p)
+            if limite and len(elenco) >= limite:
+                return dict(list(elenco.items())[:limite])
+            pagina += 1
+        if giro:
+            log(f'elenco, passaggio {giro + 1}: {len(elenco) - prima} prodotti in più')
     return elenco
+
+
+def ricontrolla_mancanti(sd, elenco, prodotti, rapporto):
+    """Prodotti già nello stato ma assenti dall'elenco: prima di toglierli
+    (e con loro le traduzioni) si rilegge la scheda. Se è attiva resta."""
+    mancanti = [u for u in prodotti if u not in elenco]
+    ripresi, eliminati, letti = [], [], set()
+
+    def controlla(u):
+        try:
+            p = sd.get('products/product.json', uid=u)
+        except RuntimeError as e:
+            if 'Product not found' in str(e):      # eliminato da Storeden: va tolto
+                eliminati.append(u)
+                letti.add(u)
+                return
+            raise
+        letti.add(u)
+        if isinstance(p, dict) and p.get('status') is not None:
+            elenco[u] = base_da_api(p)
+            if elenco[u]['stato'] == '1':
+                ripresi.append(u)
+        else:
+            eliminati.append(u)
+    _, errori = in_parallelo(sd, mancanti[:MAX_RICONTROLLI], controlla, 'ricontrolli')
+    # scheda non letta (errore, budget finito, oltre MAX_RICONTROLLI): il prodotto
+    # resta com'era stanotte, si ricontrolla al prossimo giro
+    tenuti = 0
+    for u in mancanti:
+        if u not in letti and u not in elenco:
+            vecchio = prodotti[u]
+            elenco[u] = {'prezzo': vecchio.get('prezzo'), 'prezzo_finale': vecchio.get('prezzo_finale'),
+                         'stato': '1' if vecchio.get('visibile') else '0', 'giacenza': vecchio.get('giacenza') or 0,
+                         'foto': '', 'upd': vecchio.get('upd')}
+            tenuti += 1
+    if mancanti:
+        log(f'assenti dall\'elenco: {len(mancanti)}, ancora attivi: {len(ripresi)}, '
+            f'eliminati: {len(eliminati)}, non ricontrollati (tenuti): {tenuti}')
+        rapporto['ricontrollati'] = {'assenti_elenco': len(mancanti), 'ancora_attivi': len(ripresi),
+                                     'eliminati': len(eliminati), 'tenuti_senza_controllo': tenuti}
+        if errori:
+            rapporto['avvisi'].append(f'{len(errori)} ricontrolli non riusciti, es. {errori[:2]}')
 
 
 def normalizza_api(p):
@@ -560,6 +620,8 @@ def main():
     # 1) elenco completo: prezzi, giacenze, stato, foto, data di modifica
     elenco = leggi_elenco(sd, a.limite)
     log('prodotti in Storeden:', len(elenco), '- chiamate', sd.chiamate)
+    if not a.limite:
+        ricontrolla_mancanti(sd, elenco, prodotti, rapporto)
     # prodotti attivi: con foto vanno su Google e Clerk, senza foto solo su Clerk
     candidati = [u for u, e in elenco.items() if e['stato'] == '1']
     if not a.limite:
@@ -593,20 +655,33 @@ def main():
     # 3) schede complete solo per i prodotti nuovi o modificati (i nuovi prima)
     da_leggere = sorted((u for u in candidati if prodotti.get(u, {}).get('upd') != elenco[u]['upd']),
                         key=lambda u: (u in prodotti, not elenco[u]['foto']))
-    log('schede da leggere:', len(da_leggere))
+    # rotazione: dopo le nuove/modificate, le schede lette da più tempo (i record
+    # vecchi senza 'letta' vengono per primi), così entrano anche i cambi che non
+    # toccano update_at (categorie via API). Prima delle traduzioni.
+    gia = set(da_leggere)
+    rotazione = sorted((u for u in candidati if u in prodotti and u not in gia),
+                       key=lambda u: prodotti[u].get('letta', 0))[:ROTAZIONE_SCHEDE if not a.limite else 0]
+    log('schede da leggere:', len(da_leggere), '+ rotazione', len(rotazione))
+    da_leggere += rotazione
 
     def leggi_scheda(u):
         p = sd.get('products/product.json', uid=u, nodes='categories_name,brand_name,gallery')
         r = normalizza_api(p)
         r['upd'] = elenco[u]['upd']
+        r['letta'] = int(time.time())
         vecchio = prodotti.get(u, {})
         r['visto'] = vecchio.get('visto') or int(time.time())   # prima volta visto (created_at Clerk)
-        # testo italiano invariato (es. cambio prezzo da un'importazione):
-        # le traduzioni già lette restano valide, niente nuove chiamate
+        # testo italiano invariato (es. cambio prezzo da un'importazione, o
+        # rilettura per rotazione): le traduzioni già lette restano valide
         if vecchio and vecchio.get('titolo_originale') == r['titolo_originale'] and vecchio.get('descrizione') == r['descrizione']:
             for tl in trad.values():
                 if tl.get(u, {}).get('upd') == vecchio.get('upd'):
                     tl[u]['upd'] = r['upd']
+        elif vecchio:
+            # testo cambiato anche se update_at no: traduzioni da rileggere
+            for tl in trad.values():
+                if u in tl:
+                    tl[u]['upd'] = None
         prodotti[u] = r
     letti, errori = in_parallelo(sd, da_leggere, leggi_scheda, 'schede')
     rapporto['schede_lette'] = letti
