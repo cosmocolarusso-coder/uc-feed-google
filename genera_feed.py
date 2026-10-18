@@ -52,6 +52,7 @@ ORDINE_TRADUZIONI = ['es', 'en', 'de', 'fr']   # chi viene riempito prima
 MAX_CHIAMATE = int(os.environ.get('MAX_CHIAMATE', 90000))  # Storeden: 100.000 / 24 h per chiave
 GIORNI_SU_ORDINAZIONE = 14     # se il prodotto non indica i giorni di consegna
 GIORNI_CATEGORIE = 7           # ogni quanto rileggere albero e nomi delle categorie
+GIORNI_TRADUZIONI = 30         # ogni quanto rileggere comunque una traduzione (correzioni fatte in Storeden)
 THREAD_API = 6
 
 # Categoria Google (tassonomia ufficiale). Le regole sono provate in ordine:
@@ -520,6 +521,10 @@ def scrivi_feed(l, items):
         f.writelines(items)
         f.write('</channel></rss>\n')
     os.replace(percorso + '.tmp', percorso)
+    # copia compressa: Merchant Center accetta anche .gz (il feed IT supera 80 MB)
+    with open(percorso, 'rb') as fi, gzip.open(percorso + '.gz.tmp', 'wb', compresslevel=6) as fo:
+        fo.writelines(fi)
+    os.replace(percorso + '.gz.tmp', percorso + '.gz')
     return percorso
 
 
@@ -594,7 +599,14 @@ def main():
         p = sd.get('products/product.json', uid=u, nodes='categories_name,brand_name,gallery')
         r = normalizza_api(p)
         r['upd'] = elenco[u]['upd']
-        r['visto'] = prodotti.get(u, {}).get('visto') or int(time.time())   # prima volta visto (created_at Clerk)
+        vecchio = prodotti.get(u, {})
+        r['visto'] = vecchio.get('visto') or int(time.time())   # prima volta visto (created_at Clerk)
+        # testo italiano invariato (es. cambio prezzo da un'importazione):
+        # le traduzioni già lette restano valide, niente nuove chiamate
+        if vecchio and vecchio.get('titolo_originale') == r['titolo_originale'] and vecchio.get('descrizione') == r['descrizione']:
+            for tl in trad.values():
+                if tl.get(u, {}).get('upd') == vecchio.get('upd'):
+                    tl[u]['upd'] = r['upd']
         prodotti[u] = r
     letti, errori = in_parallelo(sd, da_leggere, leggi_scheda, 'schede')
     rapporto['schede_lette'] = letti
@@ -620,7 +632,8 @@ def main():
             tl = trad.setdefault(l, {})
             compiti += [(l, u, per_google) for u, r in prodotti.items()
                         if da_clerk(r) and (not motivo_esclusione(r)) == per_google
-                        and tl.get(u, {}).get('upd') != r['upd']]
+                        and (tl.get(u, {}).get('upd') != r['upd']
+                             or time.time() - tl[u].get('letta', time.time()) > GIORNI_TRADUZIONI * 86400)]
     log('traduzioni da leggere:', len(compiti))
     contatori = {l: 0 for l in lingue_tr}
     lock_tr = threading.Lock()
@@ -630,7 +643,8 @@ def main():
         loc = LINGUE[l][0]
         t = traduzione(sd, u, 'product', 'title', loc)
         d = traduzione(sd, u, 'product', 'description', loc) if t and per_google else None
-        trad[l][u] = {'t': spazi(t) if t else '', 'd': testo(d)[:5000] if d else '', 'upd': prodotti[u]['upd']}   # d solo per Google
+        trad[l][u] = {'t': spazi(t) if t else '', 'd': testo(d)[:5000] if d else '',   # d solo per Google
+                      'upd': prodotti[u]['upd'], 'letta': int(time.time())}
         with lock_tr:
             contatori[l] += 1
     fatti, err = in_parallelo(sd, compiti, leggi_traduzione, 'traduzioni')
