@@ -28,7 +28,7 @@ Uscita: out/feed-<lingua>.xml               feed Google Merchant Center
         out/rapporto.json, out/index.html    (tutto in out/ è pubblicato)
         stato/stato.json.gz (NON pubblicato: contiene le giacenze esatte)
 """
-import argparse, datetime, gzip, html, json, os, queue, re, ssl, sys, threading, time
+import argparse, datetime, gzip, html, json, math, os, queue, re, ssl, sys, threading, time
 import urllib.error, urllib.parse, urllib.request
 from xml.sax.saxutils import escape
 
@@ -59,7 +59,7 @@ MAX_RICONTROLLI = 3000         # prodotti assenti dall'elenco ricontrollati con 
 # Cambi fatti via API che non toccano update_at (es. PUT products/category.json,
 # CHG-427 del tema) non farebbero mai rileggere la scheda: ogni giro si rileggono
 # anche le schede lette da più tempo, fino a ROTAZIONE_SCHEDE.
-ROTAZIONE_SCHEDE = int(os.environ.get('ROTAZIONE_SCHEDE', 5000))
+ROTAZIONE_SCHEDE = int(os.environ.get('ROTAZIONE_SCHEDE', 2000))   # le categorie arrivano già dalla mappa notturna
 
 # Categoria Google (tassonomia ufficiale). Le regole sono provate in ordine:
 # la prima che corrisponde vince. «nome» cerca nel titolo italiano,
@@ -282,10 +282,13 @@ def leggi_elenco(sd, limite):
     return elenco
 
 
-def ricontrolla_mancanti(sd, elenco, prodotti, rapporto):
+def ricontrolla_mancanti(sd, elenco, prodotti, rapporto, extra=()):
     """Prodotti già nello stato ma assenti dall'elenco: prima di toglierli
-    (e con loro le traduzioni) si rilegge la scheda. Se è attiva resta."""
+    (e con loro le traduzioni) si rilegge la scheda. Se è attiva resta.
+    `extra`: uid attivi secondo products/list.json che l'elenco a pagine ha
+    saltato in tutti i passaggi (mai visti prima): si leggono allo stesso modo."""
     mancanti = [u for u in prodotti if u not in elenco]
+    mancanti += [u for u in extra if u not in elenco and u not in prodotti]
     ripresi, eliminati, letti = [], [], set()
 
     def controlla(u):
@@ -309,7 +312,7 @@ def ricontrolla_mancanti(sd, elenco, prodotti, rapporto):
     # resta com'era stanotte, si ricontrolla al prossimo giro
     tenuti = 0
     for u in mancanti:
-        if u not in letti and u not in elenco:
+        if u not in letti and u not in elenco and u in prodotti:
             vecchio = prodotti[u]
             elenco[u] = {'prezzo': vecchio.get('prezzo'), 'prezzo_finale': vecchio.get('prezzo_finale'),
                          'stato': '1' if vecchio.get('visibile') else '0', 'giacenza': vecchio.get('giacenza') or 0,
@@ -322,6 +325,47 @@ def ricontrolla_mancanti(sd, elenco, prodotti, rapporto):
                                      'eliminati': len(eliminati), 'tenuti_senza_controllo': tenuti}
         if errori:
             rapporto['avvisi'].append(f'{len(errori)} ricontrolli non riusciti, es. {errori[:2]}')
+
+
+def uid_attivi_da_lista(sd, rapporto):
+    """products/list.json: tutti i prodotti in una chiamata (senza giacenza né
+    data di modifica). Serve solo a trovare gli uid che l'elenco a pagine salta."""
+    try:
+        lista = sd.get('products/list.json')
+    except Stop:
+        raise
+    except Exception as e:
+        rapporto['avvisi'].append(f'products/list.json non letto: {str(e)[:150]}')
+        return set()
+    return {str(p['uid']) for p in lista or [] if isinstance(p, dict) and str(p.get('status')) == '1'}
+
+
+def mappa_categorie(sd, albero):
+    """uid → categorie, leggendo l'elenco prodotti di ogni categoria
+    (~250 chiamate). PUT products/category.json non cambia update_at, quindi
+    senza questa lettura i cambi di categoria non arriverebbero mai.
+    Ritorna None se la lettura non è completa (in quel caso non si applica)."""
+    mappa, lock = {}, threading.Lock()
+
+    def leggi(cid):
+        pagina, pagine = 1, 1
+        while pagina <= pagine:
+            j = sd.get('products/paginated_list.json', page=pagina, limit=500, categoryUID=cid)
+            pagine = j.get('total_pages') or 1
+            with lock:
+                for p in j.get('products', []):
+                    mappa.setdefault(str(p['uid']), set()).add(cid)
+            pagina += 1
+    fatti, errori = in_parallelo(sd, list(albero), leggi, 'categorie')
+    return None if errori or fatti < len(albero) else mappa
+
+
+def applica_categorie(r, cat_u, albero):
+    """Categorie della scheda aggiornate con la mappa: stesse posizioni per
+    quelle confermate (la prima decide product_type e categoria Google), le
+    nuove in coda; restano anche quelle che la mappa non conosce."""
+    vecchie = [c for c in r['categorie'] if c in cat_u or c not in albero]
+    return vecchie + sorted(c for c in cat_u if c not in vecchie)
 
 
 def normalizza_api(p):
@@ -475,7 +519,7 @@ def scrivi_clerk(l, prodotti, trad_l, cat, rapporto):
             'created_at': r.get('visto') or 0, 'sku': r['codice'], 'stock': int(r['giacenza']),
             'free_shipping': bool(r.get('spedizione_gratuita')), 'brand_name': r['brand'] or 'Unknown',
             'no_image': not r['immagini'], 'available': bool(r['illimitato'] or r['giacenza'] > 0),
-            'sqmPrice': round(mq, 2),
+            'sqmPrice': math.floor(mq * 100 + 0.5 + 1e-9) / 100,   # come No Gravity: mezzo centesimo per eccesso
         })
     figli = {}
     for cid, c in cat['albero'].items():
@@ -621,7 +665,11 @@ def main():
     elenco = leggi_elenco(sd, a.limite)
     log('prodotti in Storeden:', len(elenco), '- chiamate', sd.chiamate)
     if not a.limite:
-        ricontrolla_mancanti(sd, elenco, prodotti, rapporto)
+        attivi_lista = uid_attivi_da_lista(sd, rapporto)
+        saltati = [u for u in attivi_lista if u not in elenco]
+        log('products/list.json:', len(attivi_lista), 'attivi, saltati dall\'elenco a pagine:', len(saltati))
+        rapporto['saltati_elenco_pagine'] = len(saltati)
+        ricontrolla_mancanti(sd, elenco, prodotti, rapporto, extra=saltati)
     # prodotti attivi: con foto vanno su Google e Clerk, senza foto solo su Clerk
     candidati = [u for u, e in elenco.items() if e['stato'] == '1']
     if not a.limite:
@@ -651,6 +699,10 @@ def main():
         descrizioni.setdefault(l, {})[cid] = d or ''
         nomi.setdefault(l, {})[cid] = spazi(v) if v else ''
     in_parallelo(sd, compiti, leggi_nome, 'categorie tradotte')
+
+    # mappa uid → categorie, letta prima delle schede (poche chiamate) e
+    # applicata dopo, così vale anche per le schede appena rilette
+    mappa = mappa_categorie(sd, cat['albero']) if not a.limite else None
 
     # 3) schede complete solo per i prodotti nuovi o modificati (i nuovi prima)
     da_leggere = sorted((u for u in candidati if prodotti.get(u, {}).get('upd') != elenco[u]['upd']),
@@ -689,6 +741,21 @@ def main():
         rapporto['avvisi'].append(f'{len(errori)} schede non lette, es. {errori[:3]}')
     if len(errori) > max(50, (letti + len(errori)) * 0.05):
         sys.exit(f'Troppi errori API ({len(errori)}): feed non aggiornato.')
+
+    # categorie fresche per tutti i prodotti (anche quelli non riletti)
+    if not a.limite:
+        if mappa is None:
+            rapporto['avvisi'].append('Mappa categorie incompleta: categorie lasciate come nelle schede.')
+        else:
+            cambiate = 0
+            for u, r in prodotti.items():
+                if u in mappa:
+                    nuove = applica_categorie(r, mappa[u], cat['albero'])
+                    if nuove != r['categorie']:
+                        r['categorie'] = nuove
+                        cambiate += 1
+            rapporto['categorie_aggiornate_da_mappa'] = cambiate
+            log('categorie aggiornate dalla mappa:', cambiate)
 
     # dati che cambiano spesso: sempre dall'elenco di stanotte
     for u, r in prodotti.items():

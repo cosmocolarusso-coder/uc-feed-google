@@ -41,3 +41,9 @@ La chiave API si legge da `STOREDEN_KEY` / `STOREDEN_EXCHANGE`, oppure dal file 
 ## GitHub
 - Il job «Feed Google notturno» parte alle 01:30 UTC; si può anche avviare a mano da Actions → Run workflow.
 - I feed sono su `https://cosmocolarusso-coder.github.io/uc-feed-google/feed-<lingua>.xml`; il riepilogo è in `rapporto.json`.
+
+## Controlli di completezza (dal 19/10/2026)
+- `products/list.json` (tutti i prodotti in una chiamata) come terza fonte dell'elenco: gli uid attivi che l'elenco a pagine salta vengono letti dalla scheda (`saltati_elenco_pagine` in `rapporto.json`).
+- Mappa categorie ogni notte: elenco a pagine filtrato per ogni categoria (~250 chiamate). Aggiorna le categorie di tutti i prodotti, perché `PUT products/category.json` non cambia `update_at` (`categorie_aggiornate_da_mappa` nel rapporto). Si applica solo se è stata letta per intero.
+- Rotazione schede ridotta a 2.000 a notte (`ROTAZIONE_SCHEDE`).
+- `sqmPrice` di Clerk arrotondato a mezzo centesimo per eccesso, come No Gravity.
