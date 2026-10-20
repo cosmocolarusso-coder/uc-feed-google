@@ -1,6 +1,11 @@
 # Feed Google Merchant Center – Universo Ceramiche
 
-Genera ogni notte `feed-it.xml`, `feed-en.xml`, `feed-de.xml`, `feed-es.xml` e `feed-fr.xml`, tutti **solo dalle API Storeden**.
+Genera ogni notte, **solo dalle API Storeden**:
+- feed Google `feed-<lingua>.xml.gz` (it, en, de, es, fr);
+- feed Meta `feed-meta-<lingua>.xml.gz`, uguali a quelli Google ma con «su ordinazione» = `in stock` (Meta non conosce `backorder`);
+- feed Clerk `clerk/products-<locale>.json` e `clerk/categories-<locale>.json`.
+
+I feed Google e Meta sono pubblicati solo compressi: GitHub Pages ha un limite di 1 GB.
 Sostituisce i `g-feed-*.xml` di No Gravity, fermi dal 15 luglio 2026.
 
 ## Come legge i dati

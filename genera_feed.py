@@ -740,19 +740,27 @@ def costruisci_item(uid, r, l, trad_l, percorsi_l, percorsi_it, oggi, motivi):
 
 
 def scrivi_feed(l, items):
+    """Feed Google (feed-<l>.xml.gz) e Meta (feed-meta-<l>.xml.gz), solo
+    compressi: GitHub Pages ha un limite di 1 GB e i feed Clerk pesano già
+    ~90 MB per lingua. Google e Meta leggono i .gz senza problemi.
+    Meta non conosce «backorder»: i prodotti su ordinazione sono ordinabili,
+    quindi lì risultano «in stock» (senza availability_date)."""
     _, dominio, _ = LINGUE[l]
-    percorso = os.path.join(OUT, f'feed-{l}.xml')
-    with open(percorso + '.tmp', 'w', encoding='utf-8') as f:
-        f.write('<?xml version="1.0" encoding="utf-8"?>\n<rss xmlns:g="http://base.google.com/ns/1.0" version="2.0"><channel>\n')
-        f.write(f'<title>Universo Ceramiche</title><link>{dominio}</link><description>Feed prodotti {l.upper()}</description>\n')
-        f.writelines(items)
-        f.write('</channel></rss>\n')
-    os.replace(percorso + '.tmp', percorso)
-    # copia compressa: Merchant Center accetta anche .gz (il feed IT supera 80 MB)
-    with open(percorso, 'rb') as fi, gzip.open(percorso + '.gz.tmp', 'wb', compresslevel=6) as fo:
-        fo.writelines(fi)
-    os.replace(percorso + '.gz.tmp', percorso + '.gz')
-    return percorso
+    testa = ('<?xml version="1.0" encoding="utf-8"?>\n<rss xmlns:g="http://base.google.com/ns/1.0" version="2.0"><channel>\n'
+             f'<title>Universo Ceramiche</title><link>{dominio}</link><description>Feed prodotti {l.upper()}</description>\n')
+    coda = '</channel></rss>\n'
+    meta_disp = re.compile(r'<g:availability>backorder</g:availability><g:availability_date>[^<]*</g:availability_date>')
+    for nome, righe in ((f'feed-{l}.xml.gz', items),
+                        (f'feed-meta-{l}.xml.gz', (meta_disp.sub('<g:availability>in stock</g:availability>', i) for i in items))):
+        percorso = os.path.join(OUT, nome)
+        with gzip.open(percorso + '.tmp', 'wt', encoding='utf-8', compresslevel=6) as f:
+            f.write(testa)
+            f.writelines(righe)
+            f.write(coda)
+        os.replace(percorso + '.tmp', percorso)
+    vecchio = os.path.join(OUT, f'feed-{l}.xml')       # versione non compressa dei giri precedenti
+    if os.path.exists(vecchio):
+        os.remove(vecchio)
 
 
 # ---------------------------------------------------------------- main
@@ -966,7 +974,7 @@ def main():
         scrivi_feed(l, items)
         n = len(stat) or 1
         rapporto['lingue'][l] = {
-            'file': f'feed-{l}.xml', 'prodotti': len(items), 'esclusi': motivi,
+            'file': f'feed-{l}.xml.gz', 'prodotti': len(items), 'esclusi': motivi,
             'disponibilita': {d: sum(1 for s in stat if s['disp'] == d) for d in ('in_stock', 'backorder', 'out_of_stock')},
             'con_categoria_google_%': round(100 * sum(1 for s in stat if s['gcat']) / n, 1),
             'con_ean_%': round(100 * sum(1 for s in stat if s['ean']) / n, 1),
@@ -978,7 +986,7 @@ def main():
 
     rapporto['durata_minuti'] = round((time.time() - inizio) / 60, 1)
     json.dump(rapporto, open(os.path.join(OUT, 'rapporto.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
-    righe = ''.join(f'<li><a href="feed-{l}.xml">feed-{l}.xml</a> — {v["prodotti"]} prodotti · Clerk: '
+    righe = ''.join(f'<li><a href="feed-{l}.xml.gz">feed-{l}.xml.gz</a> (Google) · <a href="feed-meta-{l}.xml.gz">feed-meta-{l}.xml.gz</a> (Meta) — {v["prodotti"]} prodotti · Clerk: '
                     f'<a href="clerk/products-{LINGUE[l][0]}.json">prodotti</a>, <a href="clerk/categories-{LINGUE[l][0]}.json">categorie</a></li>'
                     for l, v in rapporto['lingue'].items())
     open(os.path.join(OUT, 'index.html'), 'w', encoding='utf-8').write(
