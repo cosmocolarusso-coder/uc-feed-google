@@ -47,3 +47,10 @@ La chiave API si legge da `STOREDEN_KEY` / `STOREDEN_EXCHANGE`, oppure dal file 
 - Mappa categorie ogni notte: elenco a pagine filtrato per ogni categoria (~250 chiamate). Aggiorna le categorie di tutti i prodotti, perché `PUT products/category.json` non cambia `update_at` (`categorie_aggiornate_da_mappa` nel rapporto). Si applica solo se è stata letta per intero.
 - Rotazione schede ridotta a 2.000 a notte (`ROTAZIONE_SCHEDE`).
 - `sqmPrice` di Clerk arrotondato a mezzo centesimo per eccesso, come No Gravity.
+
+## Immagini (dal 20/10/2026)
+- Google rifiuta le foto oltre 64 megapixel (alcune importazioni Gessi/Flaminia hanno foto 8268×8268) e quelle in formati non supportati, e segnala quelle sotto 500 px.
+- Lo script legge le dimensioni di ogni foto dall'intestazione del file (richiesta Range, fuori dal budget API) e le tiene in cache nello stato: un id immagine Storeden non cambia mai. Al massimo `MAX_MISURE` (40.000) misure per giro.
+- Nel feed Google la foto principale è la prima valida (meglio se ≥500 px); le foto non valide vengono tolte dalle aggiuntive. Clerk usa sempre la prima foto.
+- I prodotti senza nessuna foto valida finiscono in `foto-da-sistemare.csv` (pubblicato con i feed): vanno ricaricate le foto in Storeden.
+

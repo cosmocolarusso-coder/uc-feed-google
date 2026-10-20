@@ -28,7 +28,7 @@ Uscita: out/feed-<lingua>.xml               feed Google Merchant Center
         out/rapporto.json, out/index.html    (tutto in out/ è pubblicato)
         stato/stato.json.gz (NON pubblicato: contiene le giacenze esatte)
 """
-import argparse, datetime, gzip, html, json, math, os, queue, re, ssl, sys, threading, time
+import argparse, datetime, gzip, html, json, math, os, queue, re, ssl, struct, sys, threading, time
 import urllib.error, urllib.parse, urllib.request
 from xml.sax.saxutils import escape
 
@@ -59,7 +59,14 @@ MAX_RICONTROLLI = 3000         # prodotti assenti dall'elenco ricontrollati con 
 # Cambi fatti via API che non toccano update_at (es. PUT products/category.json,
 # CHG-427 del tema) non farebbero mai rileggere la scheda: ogni giro si rileggono
 # anche le schede lette da più tempo, fino a ROTAZIONE_SCHEDE.
-ROTAZIONE_SCHEDE = int(os.environ.get('ROTAZIONE_SCHEDE', 2000))   # le categorie arrivano già dalla mappa notturna
+ROTAZIONE_SCHEDE = int(os.environ.get('ROTAZIONE_SCHEDE', 2000))
+# Immagini: Google rifiuta oltre 64 megapixel (alcune importazioni hanno foto
+# 8268×8268) e sotto i 100 px; sotto 500 px le segnala. Le dimensioni si leggono
+# dall'intestazione del file (Range) e restano in cache: le immagini Storeden
+# non cambiano mai a parità di id. Non contano nel budget API.
+MAX_MISURE = int(os.environ.get('MAX_MISURE', 40000))
+THREAD_IMMAGINI = 16
+MISURE = {}                    # id immagine → [larghezza, altezza, formato]   # le categorie arrivano già dalla mappa notturna
 
 # Categoria Google (tassonomia ufficiale). Le regole sono provate in ordine:
 # la prima che corrisponde vince. «nome» cerca nel titolo italiano,
@@ -409,6 +416,121 @@ def normalizza_api(p):
     }
 
 
+def misura_immagine(url):
+    """[larghezza, altezza, formato] leggendo solo l'inizio del file."""
+    dati = b''
+    for fine in (65535, 524287):
+        req = urllib.request.Request(url, headers={'Range': f'bytes=0-{fine}'})
+        with urllib.request.urlopen(req, timeout=30, context=SSL) as r:
+            dati = r.read()
+        if dati[:8] == b'\x89PNG\r\n\x1a\n':
+            w, h = struct.unpack('>II', dati[16:24])
+            return [w, h, 'PNG']
+        if dati[:4] == b'RIFF' and dati[8:12] == b'WEBP':
+            return [0, 0, 'WEBP']                    # accettato da Google, misura non necessaria
+        if dati[:3] == b'GIF':
+            w, h = struct.unpack('<HH', dati[6:10])
+            return [w, h, 'GIF']
+        if dati[:2] != b'\xff\xd8':
+            return [0, 0, (dati[:12].hex() or 'vuoto')]
+        i = 2
+        while i + 9 < len(dati):
+            if dati[i] != 0xFF:
+                i += 1
+                continue
+            m = dati[i + 1]
+            if m in (0xC0, 0xC1, 0xC2, 0xC3):
+                h, w = struct.unpack('>HH', dati[i + 5:i + 9])
+                return [w, h, 'JPEG']
+            if m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7:
+                i += 2
+                continue
+            i += 2 + struct.unpack('>H', dati[i + 2:i + 4])[0]
+        if len(dati) <= fine:                        # file finito senza SOF
+            break
+    return [0, 0, 'JPEG?']
+
+
+def problema_immagine(url):
+    """None se va bene (o non ancora misurata), altrimenti il motivo."""
+    d = MISURE.get(url.rsplit('/', 1)[-1])
+    if not d:
+        return None
+    w, h, fmt = d
+    if fmt not in ('JPEG', 'PNG', 'GIF', 'WEBP'):
+        return f'formato non supportato ({fmt})'
+    if fmt == 'WEBP' or not w:
+        return None
+    if w * h > 64_000_000:
+        return f'troppo grande ({w}x{h})'
+    if min(w, h) < 100:
+        return f'troppo piccola ({w}x{h})'
+    return None
+
+
+def scegli_immagini(r):
+    """Per Google: prima la foto valida più adatta (≥500 px se c'è), poi le
+    altre valide. Se nessuna è valida resta l'originale (Google la segnalerà,
+    e il prodotto finisce in foto-da-sistemare.csv)."""
+    valide = [i for i in r['immagini'] if not problema_immagine(i)]
+    if not valide:
+        return r['immagini']
+
+    def piccola(i):
+        d = MISURE.get(i.rsplit('/', 1)[-1])
+        return bool(d and d[0] and min(d[0], d[1]) < 500)
+    return sorted(valide, key=piccola)
+
+
+def misura_immagini(prodotti, rapporto):
+    """Misura le foto dei prodotti per Google non ancora in cache: prima la
+    principale, poi (se quella non va) le altre dello stesso prodotto."""
+    fatte, errori, lock = [0], [0], threading.Lock()
+
+    def misura(url):
+        try:
+            d = misura_immagine(url)
+        except Exception:
+            with lock:
+                errori[0] += 1
+            return
+        with lock:
+            MISURE[url.rsplit('/', 1)[-1]] = d
+            fatte[0] += 1
+            if fatte[0] % 10000 == 0:
+                log('immagini misurate', fatte[0])
+
+    for giro in (0, 1):
+        compiti = []
+        for r in prodotti.values():
+            if motivo_esclusione(r) or not r['immagini']:
+                continue
+            if giro == 0:
+                lista = r['immagini'][:1]
+            elif problema_immagine(r['immagini'][0]):
+                lista = r['immagini'][1:11]
+            else:
+                continue
+            compiti += [i for i in lista if i.rsplit('/', 1)[-1] not in MISURE]
+        compiti = list(dict.fromkeys(compiti))[:max(0, MAX_MISURE - fatte[0])]
+        q = queue.Queue()
+        for c in compiti:
+            q.put(c)
+
+        def lavora():
+            while True:
+                try:
+                    u = q.get_nowait()
+                except queue.Empty:
+                    return
+                misura(u)
+        th = [threading.Thread(target=lavora) for _ in range(THREAD_IMMAGINI)]
+        [t.start() for t in th]
+        [t.join() for t in th]
+    rapporto['immagini_misurate'] = {'stanotte': fatte[0], 'errori': errori[0], 'in_cache': len(MISURE)}
+    log('immagini misurate stanotte', fatte[0], 'errori', errori[0], 'in cache', len(MISURE))
+
+
 def traduzione(sd, uid, tipo, campo, locale):
     j = sd.get('translations/translation.json', uid=uid, type=tipo, selector=campo, locale=locale)
     return j.get('value') if isinstance(j, dict) and j.get('found') else None
@@ -575,14 +697,15 @@ def costruisci_item(uid, r, l, trad_l, percorsi_l, percorsi_it, oggi, motivi):
         disp, data_disp = 'out_of_stock', None
 
     brand = pulisci_brand(r['brand'])
+    immagini = scegli_immagini(r)
     c = [
         ('g:id', r['codice']),
         ('g:title', titolo[:150]),
         ('g:description', (descr or titolo)[:5000]),
         ('g:link', f'{dominio}/product/{uid}'),
-        ('g:image_link', r['immagini'][0]),
+        ('g:image_link', immagini[0]),
     ]
-    c += [('g:additional_image_link', i) for i in r['immagini'][1:11]]
+    c += [('g:additional_image_link', i) for i in immagini[1:11]]
     c += [('g:condition', 'new'), ('g:availability', disp)]
     if data_disp:
         c.append(('g:availability_date', data_disp))
@@ -797,9 +920,26 @@ def main():
 
     if sd.fermo:
         rapporto['avvisi'].append(f'Letture interrotte: {sd.fermo}. Il resto si completa nei prossimi giri.')
+    # 4b) dimensioni delle foto (fuori dal budget API), con cache nello stato
+    MISURE.update(stato.get('misure_immagini', {}))
+    misura_immagini(prodotti, rapporto)
+    stato['misure_immagini'] = MISURE
     if not a.limite:
         salva_stato(stato)
     rapporto['chiamate_api'] = sd.chiamate
+
+    # prodotti per Google senza nessuna foto valida: elenco da sistemare in Storeden
+    da_sistemare = []
+    for u, r in prodotti.items():
+        if motivo_esclusione(r):
+            continue
+        problemi = [problema_immagine(i) for i in r['immagini']]
+        if problemi and all(problemi):
+            da_sistemare.append((r['codice'], u, problemi[0], r['immagini'][0]))
+    with open(os.path.join(OUT, 'foto-da-sistemare.csv'), 'w', encoding='utf-8') as f:
+        f.write('codice;id;problema;immagine\n')
+        f.writelines(f'{c};{u};{p};{i}\n' for c, u, p, i in sorted(da_sistemare))
+    rapporto['foto_da_sistemare'] = len(da_sistemare)
 
     # 5) feed per lingua
     albero = cat['albero']
@@ -844,7 +984,7 @@ def main():
     open(os.path.join(OUT, 'index.html'), 'w', encoding='utf-8').write(
         '<!doctype html><meta charset="utf-8"><meta name="robots" content="noindex"><title>Feed UC</title>'
         f'<h1>Feed Universo Ceramiche</h1><p>Generato {rapporto["generato"]}</p><ul>{righe}</ul>'
-        '<p><a href="rapporto.json">rapporto.json</a></p>')
+        '<p><a href="rapporto.json">rapporto.json</a> · <a href="foto-da-sistemare.csv">foto-da-sistemare.csv</a></p>')
     log('fatto in', rapporto['durata_minuti'], 'minuti, chiamate', sd.chiamate)
 
 
