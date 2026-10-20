@@ -735,7 +735,10 @@ def costruisci_item(uid, r, l, trad_l, percorsi_l, percorsi_it, oggi, motivi):
         ('g:custom_label_2', disp),
         ('g:custom_label_3', 'sotto 50' if finale < 50 else 'sotto 200' if finale < 200 else 'sotto 1000' if finale < 1000 else 'oltre 1000'),
     ]
-    xml = '<item>' + ''.join(f'<{k}>{escape(str(v))}</{k}>' for k, v in c) + '</item>\n'
+    # quantità per Meta (Shops): un commento che scrivi_feed trasforma nel campo Meta
+    # e toglie dal feed Google; su ordinazione = 999, esaurito = 0
+    quantita = 999 if disp == 'backorder' else int(max(r['giacenza'], 0)) if disp == 'in_stock' else 0
+    xml = f'<item><!--q:{quantita}-->' + ''.join(f'<{k}>{escape(str(v))}</{k}>' for k, v in c) + '</item>\n'
     return xml, {'disp': disp, 'gcat': gcat, 'ean': bool(r['ean']), 'm2': bool(r['m2']), 'peso': bool(r['peso'])}
 
 
@@ -750,8 +753,13 @@ def scrivi_feed(l, items):
              f'<title>Universo Ceramiche</title><link>{dominio}</link><description>Feed prodotti {l.upper()}</description>\n')
     coda = '</channel></rss>\n'
     meta_disp = re.compile(r'<g:availability>backorder</g:availability><g:availability_date>[^<]*</g:availability_date>')
-    for nome, righe in ((f'feed-{l}.xml.gz', items),
-                        (f'feed-meta-{l}.xml.gz', (meta_disp.sub('<g:availability>in stock</g:availability>', i) for i in items))):
+    quantita = re.compile(r'<!--q:(\d+)-->')
+
+    def per_meta(i):
+        i = meta_disp.sub('<g:availability>in stock</g:availability>', i)
+        return quantita.sub(r'<g:quantity_to_sell_on_facebook>\1</g:quantity_to_sell_on_facebook>', i)
+    for nome, righe in ((f'feed-{l}.xml.gz', (quantita.sub('', i) for i in items)),
+                        (f'feed-meta-{l}.xml.gz', (per_meta(i) for i in items))):
         percorso = os.path.join(OUT, nome)
         with gzip.open(percorso + '.tmp', 'wt', encoding='utf-8', compresslevel=6) as f:
             f.write(testa)
