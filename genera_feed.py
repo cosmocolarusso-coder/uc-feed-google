@@ -615,6 +615,14 @@ ETICHETTE_ATTRIBUTI = {'Serie': 'collezione', 'Collezione': 'collezione', 'Forma
                        'Colore': 'colore', 'Bordo': 'bordo', 'Materiale': 'materiale',
                        'Tipologia': 'tipologia'}
 RE_ATTRIBUTO = re.compile(r'(?:^|\|)\s*(' + '|'.join(ETICHETTE_ATTRIBUTI) + r')\s*:\s*\|[\s|]*([^|]{1,60}?)\s*(?=\|)')
+# tipo_prodotto tradotto come nei filtri degli elementi Clerk esteri
+# (es. «Pezzi speciali» EN: tipo_prodotto in ["Skirting","Special piece"])
+TIPI_TRADOTTI = {
+    'en': {'Piastrella': 'Tile', 'Mosaico': 'Mosaic', 'Decoro': 'Decor', 'Battiscopa': 'Skirting', 'Pezzo speciale': 'Special piece'},
+    'es': {'Piastrella': 'Baldosa', 'Mosaico': 'Mosaico', 'Decoro': 'Decorado', 'Battiscopa': 'Rodapié', 'Pezzo speciale': 'Pieza especial'},
+    'de': {'Piastrella': 'Fliese', 'Mosaico': 'Mosaik', 'Decoro': 'Dekor', 'Battiscopa': 'Sockelleiste', 'Pezzo speciale': 'Formteil'},
+    'fr': {'Piastrella': 'Carreau', 'Mosaico': 'Mosaïque', 'Decoro': 'Décor', 'Battiscopa': 'Plinthe', 'Pezzo speciale': 'Pièce spéciale'},
+}
 MARCHI_PIASTRELLE = {'MARAZZI', 'RAGNO', 'TAGINA', 'PIEMME CERAMICHE', 'FLAVIKER', 'IDEA CERAMICA', 'LA FENICE'}
 TIPI_PIASTRELLA = [(r'\bbattiscopa\b', 'Battiscopa'), (r'\bmosaic', 'Mosaico'),
                    (r'\b(decoro|decori|listello|fascia|inserto)\b', 'Decoro'),
@@ -674,7 +682,10 @@ def scrivi_clerk(l, prodotti, trad_l, cat, rapporto):
             'no_image': not r['immagini'], 'available': bool(r['illimitato'] or r['giacenza'] > 0),
             'sqmPrice': math.floor(mq * 100 + 0.5 + 1e-9) / 100,   # come No Gravity: mezzo centesimo per eccesso
         })
-        out[-1].update(attributi_da_descrizione(r))
+        attributi = attributi_da_descrizione(r)
+        if 'tipo_prodotto' in attributi and l in TIPI_TRADOTTI:
+            attributi['tipo_prodotto'] = TIPI_TRADOTTI[l].get(attributi['tipo_prodotto'], attributi['tipo_prodotto'])
+        out[-1].update(attributi)
     figli = {}
     for cid, c in cat['albero'].items():
         figli.setdefault(c['padre'], []).append(int(cid))
