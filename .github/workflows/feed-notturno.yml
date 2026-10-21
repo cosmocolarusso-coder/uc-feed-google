@@ -38,11 +38,14 @@ jobs:
           path: stato
           key: stato-${{ github.run_id }}
           restore-keys: stato-
+      # Pillow per misurare le foto del configuratore pavimenti (configuratore.py)
+      - run: pip install --quiet pillow
       - name: Genera i feed
         env:
           STOREDEN_KEY: ${{ secrets.STOREDEN_KEY }}
           STOREDEN_EXCHANGE: ${{ secrets.STOREDEN_EXCHANGE }}
           MAX_CHIAMATE: ${{ inputs.max_chiamate || '90000' }}
+          MAX_IMMAGINI: '10000'
         run: python3 -I genera_feed.py
       - uses: actions/cache/save@v4
         if: always() && hashFiles('stato/stato.json.gz') != ''

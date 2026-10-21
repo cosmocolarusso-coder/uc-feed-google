@@ -645,7 +645,7 @@ def attributi_da_descrizione(r):
     return out
 
 
-def scrivi_clerk(l, prodotti, trad_l, cat, rapporto):
+def scrivi_clerk(l, prodotti, trad_l, cat, rapporto, cfg=None):
     """Clerk.io JSON Feed V2 con gli stessi campi e significati del file di
     No Gravity, su cui si basano modificatori, campagne e design di Clerk:
     - piastrelle (dimension.w > 0): price e list_price al m², sqmPrice al m²;
@@ -686,6 +686,8 @@ def scrivi_clerk(l, prodotti, trad_l, cat, rapporto):
         if 'tipo_prodotto' in attributi and l in TIPI_TRADOTTI:
             attributi['tipo_prodotto'] = TIPI_TRADOTTI[l].get(attributi['tipo_prodotto'], attributi['tipo_prodotto'])
         out[-1].update(attributi)
+        if cfg and u in cfg:   # campi del configuratore pavimenti (configuratore.py)
+            out[-1].update(cfg[u])
     figli = {}
     for cid, c in cat['albero'].items():
         figli.setdefault(c['padre'], []).append(int(cid))
@@ -1031,6 +1033,16 @@ def main():
     if doppi:
         rapporto['avvisi'].append(f'{len(doppi)} codici usati da più prodotti (tenuto il primo), es. {sorted(doppi)[:5]}')
 
+    # campi del configuratore pavimenti per Clerk (lavoro, effetto, tonalità, foto…)
+    cfg = {}
+    try:
+        sys.path.insert(0, QUI)
+        import configuratore
+        cfg, rapporto['configuratore'] = configuratore.calcola(prodotti, albero, attributi_da_descrizione, log, contesto_ssl())
+    except Exception as e:
+        rapporto['avvisi'].append(f'configuratore non calcolato: {e}')
+        log('configuratore non calcolato:', e)
+
     oggi = datetime.date.today()
     for l in lingue:
         items, motivi, stat, usati = [], {}, [], set()
@@ -1055,7 +1067,7 @@ def main():
             'con_peso_%': round(100 * sum(1 for s in stat if s['peso']) / n, 1),
         }
         log(l, len(items), 'prodotti; esclusi', motivi)
-        scrivi_clerk(l, prodotti, trad.get(l, {}), cat, rapporto)
+        scrivi_clerk(l, prodotti, trad.get(l, {}), cat, rapporto, cfg)
 
     rapporto['durata_minuti'] = round((time.time() - inizio) / 60, 1)
     json.dump(rapporto, open(os.path.join(OUT, 'rapporto.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)

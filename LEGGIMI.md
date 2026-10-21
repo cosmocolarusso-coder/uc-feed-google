@@ -59,3 +59,10 @@ La chiave API si legge da `STOREDEN_KEY` / `STOREDEN_EXCHANGE`, oppure dal file 
 - Nel feed Google la foto principale è la prima valida (meglio se ≥500 px); le foto non valide vengono tolte dalle aggiuntive. Clerk usa sempre la prima foto.
 - I prodotti senza nessuna foto valida finiscono in `foto-da-sistemare.csv` (pubblicato con i feed): vanno ricaricate le foto in Storeden.
 
+
+## Configuratore pavimenti (dal 21/10/2026)
+`configuratore.py` aggiunge al feed Clerk, solo per pavimenti e rivestimenti da proporre, i campi che il configuratore usa come filtri:
+`cfg_lavoro` (gres, spc, pareti, esterno), `cfg_effetto` (legno, marmo, pietra, cemento, cotto, tinta), `cfg_decoro` (1 = decori, rilievi, muretti, mosaici), `cfg_m2box`, `cfg_giorni`, `cfg_campione` (id del campione a 10 €), `cfg_foto_amb` (foto di una stanza), `cfg_foto_tex` (foto della sola superficie), `cfg_tono` (chiaro, beige, grigio, scuro, colore).
+- Lavoro ed effetto vengono da categorie e nome del prodotto; prima il nome («effetto legno»), poi le categorie.
+- Foto e tonalità: misurate con Pillow sulle miniature 300×300 (`cdn.storeden.net/secache/<id>`), fino a 3 foto per prodotto; risultati in `stato/immagini.json.gz`, al massimo `MAX_IMMAGINI` (10.000) foto nuove per notte. Le soglie di tonalità sono relative a tutto il catalogo (35% più chiaro = chiaro, 15% più scuro = scuro, il resto caldo o grigio secondo il colore; azzurri e verdi = colore).
+- Senza Pillow il feed si genera lo stesso, senza foto e tonalità.
