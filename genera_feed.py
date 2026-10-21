@@ -606,6 +606,37 @@ def da_clerk(r):
         re.search(r'[_-]sample$', r['codice'], re.I) or re.match(r'campion[ei]\b', r['titolo'], re.I))
 
 
+# Tabella «Etichetta: | valore» delle descrizioni importate (Marazzi, Ragno,
+# Tagina, Piemme, Gessi, Tarkett…): diventa attributi Clerk per filtri,
+# faccette ed elementi («stessa serie», «pezzi speciali»), invece di farli
+# indovinare ai modificatori AI dai nomi (che le importazioni hanno cambiato).
+ETICHETTE_ATTRIBUTI = {'Serie': 'collezione', 'Collezione': 'collezione', 'Formato': 'formato',
+                       'Spessore': 'spessore', 'Finitura': 'finitura', 'Effetto': 'effetto',
+                       'Colore': 'colore', 'Bordo': 'bordo', 'Materiale': 'materiale',
+                       'Tipologia': 'tipologia'}
+RE_ATTRIBUTO = re.compile(r'(?:^|\|)\s*(' + '|'.join(ETICHETTE_ATTRIBUTI) + r')\s*:\s*\|[\s|]*([^|]{1,60}?)\s*(?=\|)')
+MARCHI_PIASTRELLE = {'MARAZZI', 'RAGNO', 'TAGINA', 'PIEMME CERAMICHE', 'FLAVIKER', 'IDEA CERAMICA', 'LA FENICE'}
+TIPI_PIASTRELLA = [(r'\bbattiscopa\b', 'Battiscopa'), (r'\bmosaic', 'Mosaico'),
+                   (r'\b(decoro|decori|listello|fascia|inserto)\b', 'Decoro'),
+                   (r'\b(gradino|angolo|angolare|torello|scalino|zoccolo|terminale|pezzo speciale|elemento)\b', 'Pezzo speciale')]
+
+
+def attributi_da_descrizione(r):
+    t = html.unescape(r.get('descrizione') or '')
+    t = re.sub(r'<[^>]+>', '|', t)
+    out = {}
+    for etichetta, valore in RE_ATTRIBUTO.findall(t):
+        chiave, valore = ETICHETTE_ATTRIBUTI[etichetta], spazi(valore).rstrip('.')
+        if valore and chiave not in out:
+            out[chiave] = valore
+    marchio_piastrelle = pulisci_brand(r.get('brand')).upper() in MARCHI_PIASTRELLE
+    if out.get('formato') and (re.match(r'(gres|ceramica|monocottura|bicottura|pasta|klinker|cotto)', out.get('materiale', '').lower())
+                               or marchio_piastrelle and 'spessore' in out):
+        nome = (r.get('titolo') or '').lower()
+        out['tipo_prodotto'] = next((v for k, v in TIPI_PIASTRELLA if re.search(k, nome)), 'Piastrella')
+    return out
+
+
 def scrivi_clerk(l, prodotti, trad_l, cat, rapporto):
     """Clerk.io JSON Feed V2 con gli stessi campi e significati del file di
     No Gravity, su cui si basano modificatori, campagne e design di Clerk:
@@ -643,6 +674,7 @@ def scrivi_clerk(l, prodotti, trad_l, cat, rapporto):
             'no_image': not r['immagini'], 'available': bool(r['illimitato'] or r['giacenza'] > 0),
             'sqmPrice': math.floor(mq * 100 + 0.5 + 1e-9) / 100,   # come No Gravity: mezzo centesimo per eccesso
         })
+        out[-1].update(attributi_da_descrizione(r))
     figli = {}
     for cid, c in cat['albero'].items():
         figli.setdefault(c['padre'], []).append(int(cid))
