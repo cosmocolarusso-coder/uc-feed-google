@@ -903,6 +903,28 @@ def main():
             r.update(prezzo=e['prezzo'], prezzo_finale=e['prezzo_finale'], giacenza=e['giacenza'],
                      visibile=e['stato'] == '1' and not r.get('privato'))
 
+    # 3b) file di partenza (seed/traduzioni-<locale>.json.gz, {sku: [titolo, descrizione]}),
+    #     esportati dall'app Storeden «Traduzioni catalogo»: riempiono in un colpo le
+    #     traduzioni mai lette (il primo riempimento via API richiede notti).
+    #     Un titolo uguale all'italiano vuol dire «non tradotto»: si lascia alle API.
+    rapporto['traduzioni_da_seed'] = {}
+    for l in ORDINE_TRADUZIONI:
+        f = os.path.join(QUI, 'seed', f'traduzioni-{LINGUE[l][0]}.json.gz')
+        if l not in lingue or not os.path.exists(f):
+            continue
+        with gzip.open(f, 'rt', encoding='utf-8') as fh:
+            seed = json.load(fh)
+        tl, n = trad.setdefault(l, {}), 0
+        for u, r in prodotti.items():
+            v = seed.get(r['codice'])
+            if u in tl or not v or not spazi(v[0]) or spazi(v[0]) == r['titolo']:
+                continue
+            tl[u] = {'t': spazi(v[0]), 'd': testo(v[1])[:5000] if len(v) > 1 and v[1] else '',
+                     'upd': r['upd'], 'letta': int(time.time())}
+            n += 1
+        rapporto['traduzioni_da_seed'][l] = n
+        log('traduzioni da seed', l, n)
+
     # 4) traduzioni dei prodotti nuovi o con scheda cambiata. Ordine: prima i
     #    prodotti per Google in tutte le lingue (titolo + descrizione), poi
     #    quelli solo per Clerk (solo titolo: Clerk usa la descrizione italiana)
