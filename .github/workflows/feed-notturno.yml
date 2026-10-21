@@ -39,7 +39,7 @@ jobs:
           key: stato-${{ github.run_id }}
           restore-keys: stato-
       # Pillow per misurare le foto del configuratore pavimenti (configuratore.py)
-      - run: pip install --quiet pillow
+      - run: pip install --quiet "pillow==13.0.0"   # versione fissata: niente aggiornamenti non verificati
       - name: Genera i feed
         env:
           STOREDEN_KEY: ${{ secrets.STOREDEN_KEY }}
