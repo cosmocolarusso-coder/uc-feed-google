@@ -49,7 +49,10 @@ LINGUE = {
 }
 ORDINE_TRADUZIONI = ['es', 'en', 'de', 'fr']   # chi viene riempito prima
 
-MAX_CHIAMATE = int(os.environ.get('MAX_CHIAMATE', 90000))  # Storeden: 100.000 / 24 h per chiave
+MAX_CHIAMATE = int(os.environ.get('MAX_CHIAMATE', 90000))
+# giacenza pubblicata al massimo 50 («50+»): i file dei feed sono pubblici e la giacenza esatta non va mostrata.
+# Clerk e Meta usano solo «> 0» / «== 0», che non cambiano.
+GIACENZA_MAX = 50  # Storeden: 100.000 / 24 h per chiave
 GIORNI_SU_ORDINAZIONE = 14     # se il prodotto non indica i giorni di consegna
 GIORNI_CATEGORIE = 7           # ogni quanto rileggere albero e nomi delle categorie
 GIORNI_TRADUZIONI = 30         # ogni quanto rileggere comunque una traduzione (correzioni fatte in Storeden)
@@ -677,7 +680,7 @@ def scrivi_clerk(l, prodotti, trad_l, cat, rapporto, cfg=None):
             'id': int(u), 'name': nome, 'description': r['descrizione'], 'price': prezzo, 'list_price': listino,
             'image': r['immagini'][0] if r['immagini'] else SEGNAPOSTO,
             'url': f'{dominio}/product/{u}', 'categories': [int(c) for c in r['categorie']],
-            'created_at': r.get('visto') or 0, 'sku': r['codice'], 'stock': int(r['giacenza']),
+            'created_at': r.get('visto') or 0, 'sku': r['codice'], 'stock': min(int(r['giacenza']), GIACENZA_MAX),
             'free_shipping': bool(r.get('spedizione_gratuita')), 'brand_name': r['brand'] or 'Unknown',
             'no_image': not r['immagini'], 'available': bool(r['illimitato'] or r['giacenza'] > 0),
             'sqmPrice': math.floor(mq * 100 + 0.5 + 1e-9) / 100,   # come No Gravity: mezzo centesimo per eccesso
@@ -782,7 +785,7 @@ def costruisci_item(uid, r, l, trad_l, percorsi_l, percorsi_it, oggi, motivi):
     ]
     # quantità per Meta (Shops): un commento che scrivi_feed trasforma nel campo Meta
     # e toglie dal feed Google; su ordinazione = 999, esaurito = 0
-    quantita = 999 if disp == 'backorder' else int(max(r['giacenza'], 0)) if disp == 'in_stock' else 0
+    quantita = 999 if disp == 'backorder' else min(int(max(r['giacenza'], 0)), GIACENZA_MAX) if disp == 'in_stock' else 0
     xml = f'<item><!--q:{quantita}-->' + ''.join(f'<{k}>{escape(str(v))}</{k}>' for k, v in c) + '</item>\n'
     return xml, {'disp': disp, 'gcat': gcat, 'ean': bool(r['ean']), 'm2': bool(r['m2']), 'peso': bool(r['peso'])}
 

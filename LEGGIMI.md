@@ -66,3 +66,6 @@ La chiave API si legge da `STOREDEN_KEY` / `STOREDEN_EXCHANGE`, oppure dal file 
 - Lavoro ed effetto vengono da categorie e nome del prodotto; prima il nome («effetto legno»), poi le categorie.
 - Foto e tonalità: misurate con Pillow sulle miniature 300×300 (`cdn.storeden.net/secache/<id>`), fino a 3 foto per prodotto; risultati in `stato/immagini.json.gz`, al massimo `MAX_IMMAGINI` (10.000) foto nuove per notte. Le soglie di tonalità sono relative a tutto il catalogo (35% più chiaro = chiaro, 15% più scuro = scuro, il resto caldo o grigio secondo il colore; azzurri e verdi = colore).
 - Senza Pillow il feed si genera lo stesso, senza foto e tonalità.
+
+## Giacenza pubblicata (dal 21/10/2026)
+I file dei feed sono pubblici: la giacenza esce al massimo **50** («50+», `GIACENZA_MAX`) nel campo `stock` di Clerk e in `quantity_to_sell_on_facebook` di Meta (su ordinazione resta 999). Regole ed elementi di Clerk usano solo `stock > 0` / `stock == 0`, che non cambiano. La giacenza esatta resta solo nello stato privato (cache di GitHub Actions).
