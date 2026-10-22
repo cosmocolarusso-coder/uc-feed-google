@@ -624,7 +624,7 @@ TIPI_TRADOTTI = {
     'en': {'Piastrella': 'Tile', 'Mosaico': 'Mosaic', 'Decoro': 'Decor', 'Battiscopa': 'Skirting', 'Pezzo speciale': 'Special piece'},
     'es': {'Piastrella': 'Baldosa', 'Mosaico': 'Mosaico', 'Decoro': 'Decorado', 'Battiscopa': 'Rodapié', 'Pezzo speciale': 'Pieza especial'},
     'de': {'Piastrella': 'Fliese', 'Mosaico': 'Mosaik', 'Decoro': 'Dekor', 'Battiscopa': 'Sockelleiste', 'Pezzo speciale': 'Formteil'},
-    'fr': {'Piastrella': 'Carreau', 'Mosaico': 'Mosaïque', 'Decoro': 'Décor', 'Battiscopa': 'Plinthe', 'Pezzo speciale': 'Pièce spéciale'},
+    'fr': {'Piastrella': 'Carrelage', 'Mosaico': 'Mosaïque', 'Decoro': 'Décor', 'Battiscopa': 'Plinthe', 'Pezzo speciale': 'Pièce spéciale'},
 }
 MARCHI_PIASTRELLE = {'MARAZZI', 'RAGNO', 'TAGINA', 'PIEMME CERAMICHE', 'FLAVIKER', 'IDEA CERAMICA', 'LA FENICE'}
 TIPI_PIASTRELLA = [(r'\bbattiscopa\b', 'Battiscopa'), (r'\bmosaic', 'Mosaico'),
