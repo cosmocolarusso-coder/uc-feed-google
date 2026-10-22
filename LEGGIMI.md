@@ -3,7 +3,7 @@
 Genera ogni notte, **solo dalle API Storeden**:
 - feed Google `feed-<lingua>.xml.gz` (it, en, de, es, fr);
 - feed Meta `feed-meta-<lingua>.xml.gz`, uguali a quelli Google ma con «su ordinazione» = `in stock` (Meta non conosce `backorder`);
-- feed Clerk `clerk/products-<locale>.json` e `clerk/categories-<locale>.json`.
+- feed Clerk `clerk/products-<locale>.json` e `clerk/categories-<locale>.json`. Clerk legge le categorie da `https://raw.githubusercontent.com/cosmocolarusso-coder/uc-feed-google/clerk-categorie/categories-<locale>.json` (ramo riscritto ogni notte): dallo stesso host del file prodotti la seconda richiesta falliva a volte con «Connection reset by peer».
 
 I feed Google e Meta sono pubblicati solo compressi: GitHub Pages ha un limite di 1 GB.
 Sostituisce i `g-feed-*.xml` di No Gravity, fermi dal 15 luglio 2026.

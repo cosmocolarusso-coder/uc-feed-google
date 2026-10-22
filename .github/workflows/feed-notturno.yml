@@ -11,7 +11,7 @@ on:
         default: '90000'
 
 permissions:
-  contents: read
+  contents: write          # ramo clerk-categorie (vedi sotto)
   pages: write
   id-token: write
   actions: write            # salvare la cache dello stato
@@ -52,6 +52,16 @@ jobs:
         with:
           path: stato
           key: stato-${{ github.run_id }}
+      # Categorie Clerk anche su raw.githubusercontent.com (ramo orfano riscritto ogni notte):
+      # Clerk le scarica subito dopo il file prodotti da ~100 MB e sulla stessa connessione
+      # di github.io riceveva «Connection reset by peer»; con un altro host apre una connessione nuova.
+      - name: Pubblica le categorie Clerk sul ramo clerk-categorie
+        if: hashFiles('out/clerk/categories-it_IT.json') != ''
+        run: |
+          mkdir /tmp/cat && cp out/clerk/categories-*.json /tmp/cat/ && cd /tmp/cat
+          git init -q -b clerk-categorie
+          git add . && git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -q -m "Categorie Clerk ${{ github.run_id }}"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" clerk-categorie
       - uses: actions/upload-pages-artifact@v3
         with:
           path: out
