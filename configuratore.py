@@ -35,6 +35,19 @@ DECORO = re.compile(r'struttura\s*3d|(?<!reactive )\b3d\b|muretto|decor|savana|f
 EFFETTI = {'legno': 'legno', 'marmo': 'marmo', 'travertino': 'marmo', 'onice': 'marmo', 'pietra': 'pietra',
            'cemento': 'cemento', 'resina': 'cemento', 'cotto': 'cotto'}
 RE_EFFETTO = re.compile(r'effetto\s+(legno|marmo|travertino|onice|pietra|cemento|resina|cotto)', re.I)
+# [CHG-489] effetto dedotto anche da parole del nome (serie in inglese, marmi e pietre per nome, tinte unite):
+# prima della modifica un terzo del gres (2.436 prodotti) restava senza effetto e non compariva mai nel configuratore.
+EFFETTO_PAROLE = [
+    ('legno', re.compile(r'\b(wood|oak|rovere|larice|noce|teak|frassino|olmo|faggio|castagno|quercia|parquet|doga|plank|timber)\b', re.I)),
+    ('marmo', re.compile(r'\b(marble|marmi|onyx|onice|calacatta|statuario|carrara|arabescato|alabastro|breccia|agata|quarzo)\b', re.I)),
+    ('pietra', re.compile(r'\b(stone|pietre|quarzite|quartzite|ardesia|slate|basalt|basalto|limestone|lavica|lava|granit\w*|sandstone|travertin\w*)\b', re.I)),
+    ('cemento', re.compile(r'\b(concrete|cement\w*|beton|resin\w*|industrial|metal\w*|rust|corten|ossid\w*)\b', re.I)),
+    ('cotto', re.compile(r'\b(cotto|terracotta|terra cotta|clay|argilla)\b', re.I)),
+    ('tinta', re.compile(r'\b(tinta unita|monocolore|monocolour|solid|lucid[oa]|glossy|matt|colour|color|bianco|nero|white|black|lume|season)\b', re.I)),
+]
+MOSAICO = re.compile(r'^\s*mosaic|\bmosaic[oi]\b', re.I)
+# spessore 20 mm scritto in tutti i modi (Flaviker «20 R11», Ragno «XT20», «SP.20»…)
+ESTERNO_20 = re.compile(r'\b(20\s*mm|xt\s*20|20\s*r\s*11|20\s*r\b|sp\.?\s*20\b|spessore\s*2\b|sp\.?\s*2\s*cm)', re.I)
 
 
 def _norm(s):
@@ -56,11 +69,13 @@ def lavoro(r, nomi):
     t = r.get('titolo') or ''
     if not (r.get('m2') or (r.get('w') or 0) > 0) or ACCESSORI.search(t):
         return ''
+    if MOSAICO.search(t) or 'mosaici' in nomi:   # [CHG-489] i mosaici non sono un pavimento né un rivestimento da proporre
+        return ''
     if re.match(r'\s*(rivestiment|muretto)', t, re.I):
         return 'pareti'
     if 'rivestimenti' in nomi and 'pavimenti' not in nomi:
         return 'pareti'
-    if nomi & {'antiscivolo da esterno', 'gres spessore 2cm'} or re.search(r'\b(sp\.?\s*2\s*cm|20\s*mm)\b', t, re.I):
+    if nomi & {'antiscivolo da esterno', 'gres spessore 2cm'} or ESTERNO_20.search(t):   # [CHG-489]
         return 'esterno'
     if nomi & {'spc', 'lvt autoposanti', 'lvt interlocking', 'laminato'}:
         return 'spc'
@@ -86,6 +101,9 @@ def effetto(r, nomi, attr_effetto=''):
             return v
     if re.search(r'travertin', t, re.I):
         return 'marmo'
+    for v, rx in EFFETTO_PAROLE:   # [CHG-489]
+        if rx.search(t):
+            return v
     return ''
 
 
