@@ -617,7 +617,8 @@ ETICHETTE_ATTRIBUTI = {'Serie': 'collezione', 'Collezione': 'collezione', 'Forma
                        'Spessore': 'spessore', 'Finitura': 'finitura', 'Effetto': 'effetto',
                        'Colore': 'colore', 'Bordo': 'bordo', 'Materiale': 'materiale',
                        'Tipologia': 'tipologia'}
-RE_ATTRIBUTO = re.compile(r'(?:^|\|)\s*(' + '|'.join(ETICHETTE_ATTRIBUTI) + r')\s*:\s*\|[\s|]*([^|]{1,60}?)\s*(?=\|)')
+# [CHG-495.1] il valore può seguire subito i due punti («Serie: Lumiere<br>», La Fenice/Hatria), non solo in una cella a parte
+RE_ATTRIBUTO = re.compile(r'(?:^|\|)\s*(' + '|'.join(ETICHETTE_ATTRIBUTI) + r')\s*:\s*\|?[\s|]*([^|]{1,60}?)\s*(?=\||$)')
 # tipo_prodotto tradotto come nei filtri degli elementi Clerk esteri
 # (es. «Pezzi speciali» EN: tipo_prodotto in ["Skirting","Special piece"])
 TIPI_TRADOTTI = {
