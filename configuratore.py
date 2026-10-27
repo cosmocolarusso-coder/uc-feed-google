@@ -6,7 +6,9 @@ Qui si ricavano i dati che Clerk non ha:
 
   cfg_lavoro    gres | spc | pareti | esterno   (vuoto = non è un pavimento/rivestimento da proporre)
   cfg_effetto   legno | marmo | pietra | cemento | cotto | tinta
-  cfg_decoro    1 per decori, rilievi, muretti, cementine, mosaici… (non rappresentano una scelta)
+  cfg_decoro    1 per decori, muretti, cementine, mosaici… (non rappresentano una scelta);
+                2 per le versioni a rilievo («struttura 3D») di una piastrella base: coordinati della stessa serie [CHG-495]
+  cfg_parete    1 se si può posare anche a parete (rivestimenti, e pavimenti con «Utilizzo: pavimento e rivestimento») [CHG-495]
   cfg_m2box     m² per scatola
   cfg_giorni    giorni di consegna
   cfg_campione  id del campione a 10 € (codice <codice>_sample), 0 se non c'è
@@ -30,8 +32,16 @@ FOTO_PER_PRODOTTO = 3
 
 ACCESSORI = re.compile(r'battiscop|cordol|profil|zoccol|gradin|angolar|pezz[oi] special|campion|sample|colla|tappetin|torello|'
                        r'scalin|\bstep\b|terminal|bordo|sigillant|stucco|fuga\b|fughe|distanziator|primer|detergent', re.I)
-DECORO = re.compile(r'struttura\s*3d|(?<!reactive )\b3d\b|muretto|decor|savana|floret|petal|gelosia|patchwork|\bmix\b|segment|'
+DECORO = re.compile(r'muretto|decor|\bdeco\b|savana|floret|petal|gelosia|patchwork|\bmix\b|segment|'
                     r'\bbande\b|cementin|optical|fiori|foglie|flora|inserto|listell|mosaic|boiserie|eivissa', re.I)
+# [CHG-495] le versioni a rilievo («struttura 3D Vento», «Rigo 3D») non sono decori: sono il coordinato della piastrella base.
+# Prima erano cfg_decoro=1 (398 rivestimenti): mai proposte e senza tonalità misurata. «strutturato» (finitura antiscivolo) non c'entra.
+RILIEVO = re.compile(r'\bstruttura\b|(?<!reactive )\b3d\b', re.I)          # rivestimenti
+RILIEVO_PAV = re.compile(r'\bstruttura\b', re.I)                            # pavimenti: «3D» da solo è una finitura (Flaviker «LUX 3D», «LAPPATO ANT. 3D»)
+# [CHG-495] materiali da parete: anche se il prodotto sta in una categoria Pavimenti è un rivestimento
+MATERIALE_PARETE = re.compile(r'pasta bianca|bicottura|monoporosa', re.I)
+# [CHG-495] «Utilizzo: Pavimento e rivestimento» nella descrizione: il gres si può posare anche a parete
+USO_PARETE = re.compile(r'(utilizzo|destinazione|uso|applicazion\w*)\s*:?\s*\|?[^|]{0,40}(rivestiment|paret|wall)', re.I)
 EFFETTI = {'legno': 'legno', 'marmo': 'marmo', 'travertino': 'marmo', 'onice': 'marmo', 'pietra': 'pietra',
            'cemento': 'cemento', 'resina': 'cemento', 'cotto': 'cotto'}
 RE_EFFETTO = re.compile(r'effetto\s+(legno|marmo|travertino|onice|pietra|cemento|resina|cotto)', re.I)
@@ -65,13 +75,13 @@ def antenati(categorie, albero):
     return nomi
 
 
-def lavoro(r, nomi):
+def lavoro(r, nomi, materiale=''):
     t = r.get('titolo') or ''
     if not (r.get('m2') or (r.get('w') or 0) > 0) or ACCESSORI.search(t):
         return ''
     if MOSAICO.search(t) or 'mosaici' in nomi:   # [CHG-489] i mosaici non sono un pavimento né un rivestimento da proporre
         return ''
-    if re.match(r'\s*(rivestiment|muretto)', t, re.I):
+    if re.match(r'\s*(rivestiment|muretto)', t, re.I) or MATERIALE_PARETE.search(materiale or ''):   # [CHG-495] materiale
         return 'pareti'
     if 'rivestimenti' in nomi and 'pavimenti' not in nomi:
         return 'pareti'
@@ -222,16 +232,22 @@ def calcola(prodotti, albero, attributi_di, log, ssl_ctx=None):
         if not r.get('visibile'):
             continue
         nomi = antenati(r.get('categorie') or [], albero)
-        lav = lavoro(r, nomi)
+        att = attributi_di(r)
+        lav = lavoro(r, nomi, att.get('materiale', ''))
         if not lav:
             continue
-        att = attributi_di(r)
-        dec = 1 if DECORO.search(r.get('titolo') or '') or att.get('tipo_prodotto') in ('Decoro', 'Mosaico') else 0
-        base[u] = {'cfg_lavoro': lav, 'cfg_effetto': effetto(r, nomi, att.get('effetto', '')), 'cfg_decoro': dec,
+        titolo = r.get('titolo') or ''
+        dec = 1 if DECORO.search(titolo) or att.get('tipo_prodotto') in ('Decoro', 'Mosaico') else 2 if (RILIEVO if lav == 'pareti' else RILIEVO_PAV).search(titolo) else 0   # [CHG-495]
+        eff = effetto(r, nomi, att.get('effetto', ''))
+        if lav == 'pareti' and not eff and dec != 1:
+            eff = 'tinta'   # [CHG-495] un rivestimento senza effetto nel nome (Replace Beige, Creek Grigio…) è una tinta unita: prima restava invisibile
+        descr = re.sub(r'<[^>]+>', '|', r.get('descrizione') or '')
+        base[u] = {'cfg_lavoro': lav, 'cfg_effetto': eff, 'cfg_decoro': dec,
+                   'cfg_parete': 1 if lav == 'pareti' or USO_PARETE.search(descr) else 0,   # [CHG-495]
                    'cfg_m2box': round(r.get('m2') or r.get('w') or 0, 3), 'cfg_giorni': int(r.get('giorni_consegna') or 0),
                    'cfg_campione': campioni.get((r.get('codice') or '').lower(), 0)}
     cache = carica_cache()
-    da_fare = [_id(i) for u in base if not base[u]['cfg_decoro'] for i in prodotti[u]['immagini'][:FOTO_PER_PRODOTTO]]
+    da_fare = [_id(i) for u in base if base[u]['cfg_decoro'] != 1 for i in prodotti[u]['immagini'][:FOTO_PER_PRODOTTO]]   # [CHG-495] anche i rilievi
     nuove = analizza_foto(da_fare, cache, log, ssl_ctx)
     if nuove:
         salva_cache(cache)
