@@ -77,6 +77,8 @@ def lavoro(r, nomi):
         return 'pareti'
     if nomi & {'antiscivolo da esterno', 'gres spessore 2cm'} or ESTERNO_20.search(t):   # [CHG-489]
         return 'esterno'
+    if re.search(r'\bgrip\b', t, re.I):   # [CHG-489.1] «grip» nel titolo = versione antiscivolo da esterno (regola del titolare, 27/10/2026)
+        return 'esterno'
     if nomi & {'spc', 'lvt autoposanti', 'lvt interlocking', 'laminato'}:
         return 'spc'
     if nomi & {'gres porcellanato', 'gres grandi formati', 'gres porcellanato sottile'} or ('pavimenti' in nomi and re.search(r'\bgres\b', t, re.I)):
