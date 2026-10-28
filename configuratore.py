@@ -59,7 +59,7 @@ EFFETTO_PAROLE = [
     ('cotto', re.compile(r'\b(cotto|terracotta|terra cotta|clay|argilla)\b', re.I)),
     ('tinta', re.compile(r'\b(tinta unita|monocolore|monocolour|solid|lucid[oa]|glossy|matt|colour|color|bianco|nero|white|black|lume|season)\b', re.I)),
 ]
-MOSAICO = re.compile(r'^\s*mosaic|\bmosaic[oi]\b', re.I)
+MOSAICO = re.compile(r'^\s*mosaic|\bmosaic[oi]\b|\bmos\d', re.I)   # [CHG-510] Flaviker «ROCKIN MOS36» = mosaico
 # spessore 20 mm scritto in tutti i modi (Flaviker «20 R11», Ragno «XT20», «SP.20»…)
 ESTERNO_20 = re.compile(r'\b(20\s*mm|xt\s*20|20\s*r\s*11|20\s*r\b|sp\.?\s*20\b|spessore\s*2\b|sp\.?\s*2\s*cm)', re.I)
 
