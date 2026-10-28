@@ -36,7 +36,11 @@ DECORO = re.compile(r'muretto|decor|\bdeco\b|savana|floret|petal|gelosia|patchwo
                     r'\bbande\b|cementin|optical|fiori|foglie|flora|inserto|listell|mosaic|boiserie|eivissa', re.I)
 # [CHG-495] le versioni a rilievo («struttura 3D Vento», «Rigo 3D») non sono decori: sono il coordinato della piastrella base.
 # Prima erano cfg_decoro=1 (398 rivestimenti): mai proposte e senza tonalità misurata. «strutturato» (finitura antiscivolo) non c'entra.
-RILIEVO = re.compile(r'\bstruttura\b|(?<!reactive )\b3d\b', re.I)          # rivestimenti
+RILIEVO = re.compile(r'\bstruttura\b|\b3d\b|esagonett|cannet[eé]', re.I)      # rivestimenti (anche Esagonetta, Canneté, Reactive 3D)
+# [CHG-505] «3D» nel nome di un gres = decoro a rilievo da parete (Piemme Esagonetta 3D, Ragno Foglia 3D, Marazzi righe 3D, La Fenice Reactive 3D),
+# tranne le finiture Flaviker («LUX 3D», «SOFT 3D», «LAPPATO ANT. 3D»): quei prodotti passano a rivestimento e non vengono mai proposti come pavimento
+FINITURA_3D = re.compile(r'(lux|soft|lappato|ant\.?|nat\.?)\s*3d\b', re.I)
+RILIEVO_PARETE = re.compile(r'\b3d\b|esagonett|cannet[eé]', re.I)
 RILIEVO_PAV = re.compile(r'\bstruttura\b', re.I)                            # pavimenti: «3D» da solo è una finitura (Flaviker «LUX 3D», «LAPPATO ANT. 3D»)
 # [CHG-495] materiali da parete: anche se il prodotto sta in una categoria Pavimenti è un rivestimento
 MATERIALE_PARETE = re.compile(r'pasta bianca|bicottura|monoporosa', re.I)
@@ -82,6 +86,8 @@ def lavoro(r, nomi, materiale=''):
     if MOSAICO.search(t) or 'mosaici' in nomi:   # [CHG-489] i mosaici non sono un pavimento né un rivestimento da proporre
         return ''
     if re.match(r'\s*(rivestiment|muretto)', t, re.I) or MATERIALE_PARETE.search(materiale or ''):   # [CHG-495] materiale
+        return 'pareti'
+    if RILIEVO_PARETE.search(t) and not FINITURA_3D.search(t):   # [CHG-505] rilievi 3D ed esagonette: parete
         return 'pareti'
     if 'rivestimenti' in nomi and 'pavimenti' not in nomi:
         return 'pareti'
