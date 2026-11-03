@@ -69,3 +69,16 @@ La chiave API si legge da `STOREDEN_KEY` / `STOREDEN_EXCHANGE`, oppure dal file 
 
 ## Giacenza pubblicata (dal 21/10/2026)
 I file dei feed sono pubblici: la giacenza esce al massimo **50** («50+», `GIACENZA_MAX`) nel campo `stock` di Clerk e in `quantity_to_sell_on_facebook` di Meta (su ordinazione resta 999). Regole ed elementi di Clerk usano solo `stock > 0` / `stock == 0`, che non cambiano. La giacenza esatta resta solo nello stato privato (cache di GitHub Actions).
+
+## Catalogo dei configuratori su Shopify (CHG-595)
+Workflow separato `.github/workflows/configuratori-shopify.yml`, ogni notte alle 02:15 UTC (avvio anche a mano dalla scheda Actions).
+`catalogo_configuratori.py notte` legge tutto **da Shopify**, non da Storeden:
+- prodotti con query bulk;
+- nomi tradotti;
+- vendite degli ultimi 365 giorni.
+
+Poi scrive i 10 file `uc-cfg-<rub|pav>-<lingua>.json` e li carica sul tema. Li leggono i configuratori rubinetti e pavimenti al posto di Clerk.
+- **Segreti del repository:** `SHOPIFY_CLIENT_ID` e `SHOPIFY_CLIENT_SECRET`, le credenziali dell'app «UC Migrazione Storeden» del Dev Dashboard.
+- **Variabili facoltative:** `SHOPIFY_SHOP` e `SHOPIFY_TEMA`. Se mancano si usano il negozio di prova `wmprxj-bx` e il tema di prova 201048392024. Al passaggio al negozio vero vanno cambiate.
+- **Protezione:** se la rubinetteria ha meno di 25.000 righe o i pavimenti meno di 12.000, non carica nulla e il lavoro risulta fallito. Sul tema resta il catalogo della notte prima.
+- **In locale**, dalla cartella `feed-google` dentro il repository del tema, usa `../shopify/.env` e le cartelle di prima. La fase `metafield`, che copia una volta i campi `uc_cfg` da Clerk, funziona solo in locale.
