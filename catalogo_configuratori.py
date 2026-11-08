@@ -40,7 +40,7 @@ ASSETS = pathlib.Path(os.environ.get('CFG_ASSETS') or SHOP / 'tema-uc' / 'tema' 
 PRODOTTI = OUT / 'prodotti.jsonl'
 NOMI = OUT / 'nomi.json'
 VENDITE = OUT / 'vendite.json'
-TEMA = 'gid://shopify/OnlineStoreTheme/' + os.environ.get('SHOPIFY_TEMA', '201048392024')   # tema di prova «UC – menu nuovo»
+TEMA = 'gid://shopify/OnlineStoreTheme/' + os.environ.get('SHOPIFY_TEMA', '201114878296')   # tema di prova «UC – menu nuovo (prova)» (CHG-720; 201048392024 è la riserva)
 MIN_RIGHE = {'rub': 25000, 'pav': 12000}   # 03/11/2026: 35.756 e 18.327; sotto queste soglie l'esportazione è sospetta
 VERSIONE = '2026-10'
 LINGUE = ['it', 'en', 'fr', 'de', 'es']
@@ -429,6 +429,10 @@ def carica():
         if righe < MIN_RIGHE[n.split('-')[2]]:
             raise SystemExit(f'{n}: {righe} righe, meno di {MIN_RIGHE[n.split("-")[2]]}: non carico nulla')
     sh = Shopify()
+    tema = sh.gql('query($id:ID!){theme(id:$id){name role}}', {'id': TEMA})['theme']
+    print('tema', TEMA.rsplit('/', 1)[-1], tema, flush=True)
+    if not tema or 'non usare' in tema['name'].lower():   # [CHG-720] mai sul tema di riserva
+        raise SystemExit(f'tema {TEMA} non valido ({tema}): controllare SHOPIFY_TEMA, non carico nulla')
     for n in nomi:
         r = sh.gql('''mutation($id:ID!,$f:[OnlineStoreThemeFilesUpsertFileInput!]!){themeFilesUpsert(themeId:$id,files:$f){
           upsertedThemeFiles{filename} userErrors{filename code message}}}''',

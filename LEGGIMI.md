@@ -79,6 +79,6 @@ Workflow separato `.github/workflows/configuratori-shopify.yml`, ogni notte alle
 
 Poi scrive i 10 file `uc-cfg-<rub|pav>-<lingua>.json` e li carica sul tema. Li leggono i configuratori rubinetti e pavimenti al posto di Clerk.
 - **Segreti del repository:** `SHOPIFY_CLIENT_ID` e `SHOPIFY_CLIENT_SECRET`, le credenziali dell'app «UC Migrazione Storeden» del Dev Dashboard.
-- **Variabili facoltative:** `SHOPIFY_SHOP` e `SHOPIFY_TEMA`. Se mancano si usano il negozio di prova `wmprxj-bx` e il tema di prova 201048392024. Al passaggio al negozio vero vanno cambiate.
+- **Variabili facoltative:** `SHOPIFY_SHOP` e `SHOPIFY_TEMA`. Se mancano si usano il negozio di prova `wmprxj-bx` e il tema di prova 201114878296 «UC – menu nuovo (prova)» (fino all'8/11/2026 era 201048392024, ora tema di riserva: lo script rifiuta i temi con «non usare» nel nome). Al passaggio al negozio vero vanno cambiate.
 - **Protezione:** se la rubinetteria ha meno di 25.000 righe o i pavimenti meno di 12.000, non carica nulla e il lavoro risulta fallito. Sul tema resta il catalogo della notte prima.
 - **In locale**, dalla cartella `feed-google` dentro il repository del tema, usa `../shopify/.env` e le cartelle di prima. La fase `metafield`, che copia una volta i campi `uc_cfg` da Clerk, funziona solo in locale.

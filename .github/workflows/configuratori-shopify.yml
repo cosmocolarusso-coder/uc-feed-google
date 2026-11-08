@@ -29,9 +29,10 @@ jobs:
           SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
           SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
           # negozio e tema: variabili del repository (Settings → Secrets and variables → Variables); al passaggio
-          # al negozio vero basta cambiarle. Senza variabili: negozio di prova e tema «UC – menu nuovo (prova)».
+          # al negozio vero basta cambiarle. Senza variabili: negozio di prova e tema «UC – menu nuovo (prova)» 201114878296
+          # (CHG-720: prima 201048392024, ora la riserva «non usare»: su un tema «non usare» lo script non carica nulla).
           SHOPIFY_SHOP: ${{ vars.SHOPIFY_SHOP || 'wmprxj-bx.myshopify.com' }}
-          SHOPIFY_TEMA: ${{ vars.SHOPIFY_TEMA || '201048392024' }}
+          SHOPIFY_TEMA: ${{ vars.SHOPIFY_TEMA || '201114878296' }}
           CFG_OUT: ${{ runner.temp }}/configuratori
           CFG_ASSETS: ${{ runner.temp }}/assets
         run: python3 -I catalogo_configuratori.py notte
