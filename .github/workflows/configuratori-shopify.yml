@@ -1,7 +1,8 @@
 name: Catalogo configuratori Shopify
 
 # [CHG-595] Ogni notte: prodotti, prezzi, disponibilità, nomi tradotti e vendite da Shopify →
-# assets/uc-cfg-<rub|pav>-<lingua>.json caricati sul tema (catalogo_configuratori.py, fase «notte»).
+# assets/uc-cfg-<rub|pav>-<lingua>-indice.json + un file per blocco, caricati sul tema (catalogo_configuratori.py, fase «notte»).
+# [CHG-770] Dal 10/11/2026 catalogo a blocchi (indice leggero + blocchi scaricati a richiesta dalle app).
 # Se l'esportazione dà troppe poche righe non carica nulla e sul tema resta il catalogo della notte prima.
 on:
   schedule:
@@ -29,10 +30,11 @@ jobs:
           SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
           SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
           # negozio e tema: variabili del repository (Settings → Secrets and variables → Variables); al passaggio
-          # al negozio vero basta cambiarle. Senza variabili: negozio di prova e tema «UC – menu nuovo (prova)» 201114878296
-          # (CHG-720: prima 201048392024, ora la riserva «non usare»: su un tema «non usare» lo script non carica nulla).
+          # al negozio vero basta cambiarle. Senza variabili: negozio di prova e tema di sviluppo «UC – Casa accolta (sviluppo)»
+          # 201462514008 (CHG-770; fino al 10/11/2026 il tema di prova 201114878296, fermo come copia con gli snippet vecchi, che
+          # leggono i file interi: non va più caricato qui). Più temi separati da virgola. Su un tema «non usare» lo script non carica nulla.
           SHOPIFY_SHOP: ${{ vars.SHOPIFY_SHOP || 'wmprxj-bx.myshopify.com' }}
-          SHOPIFY_TEMA: ${{ vars.SHOPIFY_TEMA || '201114878296' }}
+          SHOPIFY_TEMA: ${{ vars.SHOPIFY_TEMA || '201462514008' }}
           CFG_OUT: ${{ runner.temp }}/configuratori
           CFG_ASSETS: ${{ runner.temp }}/assets
         run: python3 -I catalogo_configuratori.py notte

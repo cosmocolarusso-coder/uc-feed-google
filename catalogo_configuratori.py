@@ -13,9 +13,17 @@ Ordine delle righe = popolarità, come le risposte di Clerk (le app usano la pos
 prima i pezzi venduti negli ordini Shopify degli ultimi 365 giorni, a parità uc_cfg.popolarita.
 Nei file restano solo i prodotti acquistabili (tutte le domande delle app chiedono available = true e prezzo > 0);
 le parti ripetute di foto e indirizzi stanno in «p» (prefisso per colonna) e le categorie sono solo quelle usate dalle app.
-Il risultato sono i file assets/uc-cfg-<rub|pav>-<lingua>.json (colonne + righe), letti dalle app con lo stesso
-linguaggio dei filtri di Clerk (SHIM in shopify/tema-uc/configuratori.py del repository del tema). L'id di ogni riga è la
-variante Shopify da mettere nel carrello.
+Il risultato sono i file assets/uc-cfg-<rub|pav>-<lingua>-indice.json più un file per blocco (-gres, -set, …), letti
+dalle app con lo stesso linguaggio dei filtri di Clerk (SHIM in shopify/tema-uc/configuratori.py del repository del tema).
+L'id di ogni riga è la variante Shopify da mettere nel carrello.
+[CHG-770] Catalogo a blocchi: prima ogni app scaricava un file intero (6,5–13,5 MB, 0,65–1,6 MB compressi) all'avvio. Ora
+l'indice (poche decine di KB) descrive colonne, prefissi, dizionari e i blocchi con i valori che contengono (riassunti «s»:
+«in» = soli valori presenti, «out» = valori mai presenti); l'app scarica solo i blocchi che il filtro non esclude e gli altri
+a pagina ferma. Blocchi: pavimenti per lavoro (gres, spc, pareti, esterno) + «m2» (coordinati al m²) + «altro» + «mob»;
+rubinetti «set» (categoria 31596071), «cromo» e «lavabo» (31596070 per finitura), «serie» (altri pezzi delle serie).
+L'ordine globale per popolarità si ricompone con la stringa «o» (blocco di ogni riga). Nelle righe: url assente = handle
+ricavato dal nome (regola «h», stesso calcolo in Python e JS), colonne costanti in «k», dizionari «d» per le colonne con
+pochi valori, «e» = valore true → uguale a un'altra colonna (cfg_foto_tex = image, list_price = price).
 [CHG-595] Gira ogni notte su GitHub Actions (.github/workflows/configuratori-shopify.yml, fase «notte»): credenziali
 dell'app Shopify dai segreti SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET, negozio e tema da SHOPIFY_SHOP / SHOPIFY_TEMA.
 In locale (cartella feed-google dentro il repository del tema) le legge da ../shopify/.env e scrive in ../shopify/out e
@@ -27,7 +35,7 @@ Fasi:
   vendite    pezzi venduti per prodotto negli ultimi 365 giorni (ordini Shopify) → out/configuratori/vendite.json
   catalogo   scrive tema/assets/uc-cfg-*.json
   tutto      esporta + nomi + vendite + catalogo
-  carica     carica i 10 file sul tema (solo se le righe non sono calate troppo: MIN_RIGHE)
+  carica     carica indici e blocchi sul tema (solo se le righe non sono calate troppo: MIN_RIGHE)
   notte      tutto + carica (GitHub Actions)
 Uso: python3 -I catalogo_configuratori.py <fase> [--prova]"""
 import datetime, json, os, pathlib, re, subprocess, sys, time
@@ -40,7 +48,9 @@ ASSETS = pathlib.Path(os.environ.get('CFG_ASSETS') or SHOP / 'tema-uc' / 'tema' 
 PRODOTTI = OUT / 'prodotti.jsonl'
 NOMI = OUT / 'nomi.json'
 VENDITE = OUT / 'vendite.json'
-TEMA = 'gid://shopify/OnlineStoreTheme/' + os.environ.get('SHOPIFY_TEMA', '201114878296')   # tema di prova «UC – menu nuovo (prova)» (CHG-720; 201048392024 è la riserva)
+TEMI = ['gid://shopify/OnlineStoreTheme/' + x.strip() for x in os.environ.get('SHOPIFY_TEMA', '201462514008').split(',') if x.strip()]
+# [CHG-770] tema di sviluppo «UC – Casa accolta (sviluppo)» (CHG-739); prima il tema di prova 201114878296 (CHG-720), fermo dal 9/11/2026
+# come copia: ha ancora gli snippet vecchi, che leggono i file interi. Più temi: SHOPIFY_TEMA="id1,id2".
 MIN_RIGHE = {'rub': 25000, 'pav': 12000}   # 03/11/2026: 35.756 e 18.327; sotto queste soglie l'esportazione è sospetta
 VERSIONE = '2026-10'
 LINGUE = ['it', 'en', 'fr', 'de', 'es']
@@ -396,6 +406,54 @@ COLONNE = {
             'sqmPrice', 'collezione', 'finitura', 'formato', 'tipo_prodotto', 'cfg_lavoro', 'cfg_effetto', 'cfg_tono',
             'cfg_decoro', 'cfg_parete', 'cfg_m2box', 'cfg_giorni', 'cfg_campione', 'cfg_foto_amb', 'cfg_foto_tex'],
 }
+# [CHG-770] blocchi: ordine = quello in cui le app li chiedono; «pre» = scaricare a pagina ferma anche se nessuna domanda
+# lo ha ancora chiesto (mob è il modulo mobili bagno, parcheggiato: solo a richiesta)
+ORDINE_BLOCCHI = {'pav': ['gres', 'spc', 'pareti', 'esterno', 'm2', 'altro', 'mob'], 'rub': ['set', 'cromo', 'lavabo', 'serie']}
+SENZA_PRE = {'mob'}
+UGUALI = {'cfg_foto_tex': 'image', 'list_price': 'price'}   # «e»: true nella riga = stesso valore dell'altra colonna
+NO_DIZIONARIO = {'id', 'name', 'nl', 'url', 'image', 'cfg_foto_amb', 'cfg_foto_tex', 'categories'}
+MAX_DIZIONARIO = 4096   # colonne di testo con al più tanti valori distinti → dizionario nell'indice, indici nelle righe
+MAX_RIASSUNTO = 32      # colonne con al più tanti valori distinti in un blocco → elenco «in» nel riassunto del blocco
+
+
+def handle_da_nome(nome):
+    """Stessa regola di ucHandle nel SHIM: via i caratteri non ASCII, minuscole, tutto il resto diventa «-»."""
+    s = re.sub(r'[^\x00-\x7f]', '', nome).lower()
+    return re.sub(r'[^a-z0-9]+', '-', s).strip('-')
+
+
+def blocco_di(nome, r):
+    cat = set(r['categories'] or [])
+    if nome == 'rub':
+        if 31596071 in cat:
+            return 'set'
+        if 31596070 in cat:
+            return 'cromo' if (r['finitura'] or '').lower() == 'cromo' else 'lavabo'
+        return 'serie'
+    if r['cfg_lavoro']:
+        return re.sub(r'[^a-z0-9]+', '-', r['cfg_lavoro'].lower()).strip('-') or 'altro'
+    if cat & CAT_MOB:
+        return 'mob'
+    return 'm2' if r['sqmPrice'] and r['cfg_m2box'] else 'altro'
+
+
+def riassunto(righe, col):
+    """Per ogni colonna con pochi valori distinti nel blocco: {'in': [valori]} (null compreso se c'è)."""
+    s = {}
+    for i, c in enumerate(col):
+        vals, troppi = set(), False
+        for r in righe:
+            v = r[i]
+            for x in (v if isinstance(v, list) else [v]):
+                vals.add(json.dumps(x, ensure_ascii=False))
+                if len(vals) > MAX_RIASSUNTO:
+                    troppi = True
+                    break
+            if troppi:
+                break
+        if not troppi:
+            s[c] = {'in': [json.loads(x) for x in sorted(vals)]}
+    return s
 
 
 def catalogo():
@@ -404,6 +462,7 @@ def catalogo():
     venduti = json.load(open(VENDITE)) if VENDITE.exists() else {}
     ordine = lambda g: (-venduti.get(g, 0), int(prodotti[g]['cfg_popolarita'] or 10 ** 9), g)
     gruppi = dict(zip(('rub', 'pav'), in_scope(prodotti)))
+    versione = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M%S')
     for nome, ids in gruppi.items():
         col = COLONNE[nome]
         for l in LINGUE:
@@ -414,32 +473,107 @@ def catalogo():
                 for c, x in pref.items():
                     if r[c] and r[c].startswith(x):
                         r[c] = r[c][len(x):]
-            dati = {'c': col, 'p': pref, 'r': [[r[c] if r[c] not in ('', 0, []) or c in ('available', 'stock') else None for c in col] for r in righe]}
-            f = ASSETS / f'uc-cfg-{nome}-{l}.json'
-            f.write_text(json.dumps(dati, ensure_ascii=False, separators=(',', ':')))
-            print(f.name, len(righe), 'righe', f.stat().st_size // 1024, 'KB')
+                if r['url'] == handle_da_nome(r['name']):
+                    r['url'] = None           # «h»: lo ricava l'app dal nome
+                for c, altra in UGUALI.items():
+                    if c in col and r[c] not in ('', 0, None) and r[c] == r[altra]:
+                        r[c] = True           # «e»: uguale all'altra colonna
+            # colonne costanti («k») e dizionari («d»)
+            costanti = {c: righe[0][c] for c in col if righe and all(r[c] == righe[0][c] for r in righe) and righe[0][c] not in ('', 0, None, [])}
+            dizion = {}
+            for c in col:
+                if c in NO_DIZIONARIO or c in costanti:
+                    continue
+                vals = {r[c] for r in righe if isinstance(r[c], str) and r[c]}
+                if vals and all(isinstance(r[c], str) or r[c] in ('', None) for r in righe) and len(vals) <= MAX_DIZIONARIO:
+                    dizion[c] = sorted(vals)
+            indice_diz = {c: {v: i for i, v in enumerate(vs)} for c, vs in dizion.items()}
+            col_righe = [c for c in col if c not in costanti]
+
+            def valore(r, c):
+                """Valore come lo vede l'app: vuoto → null (tranne stock 0), true = uguale all'altra colonna."""
+                v = r[c]
+                if v is True and c in UGUALI:
+                    return True
+                if v in ('', [], None) or (v == 0 and c not in ('available', 'stock')):
+                    return None
+                return v
+
+            def cella(r, c):
+                v = valore(r, c)
+                return indice_diz[c][v] if c in indice_diz and isinstance(v, str) else v
+
+            # blocchi nell'ordine stabilito, poi eventuali valori nuovi di cfg_lavoro in coda (prima di altro e mob)
+            per_blocco = {}
+            for r in righe:
+                per_blocco.setdefault(blocco_di(nome, r), []).append(r)
+            noti = [b for b in ORDINE_BLOCCHI[nome] if b in per_blocco]
+            nuovi = sorted(b for b in per_blocco if b not in ORDINE_BLOCCHI[nome])
+            chiavi = [b for b in noti if b not in ('altro', 'mob')] + nuovi + [b for b in noti if b in ('altro', 'mob')]
+            blocchi, tabelle = [], {}
+            for b in chiavi:
+                tab = [[cella(r, c) for c in col_righe] for r in per_blocco[b]]
+                s = riassunto([[valore(r, c) for c in col_righe] for r in per_blocco[b]], col_righe)   # valori veri, non gli indici
+                blocchi.append({'f': f'uc-cfg-{nome}-{l}-{b}.json', 'n': len(tab), 's': s, 'pre': 0 if b in SENZA_PRE else 1})
+                tabelle[b] = tab
+            # «out»: valori che definiscono altri blocchi e qui mancano (es. finitura Cromo nel blocco «lavabo»)
+            for b, blk in zip(chiavi, blocchi):
+                for c in col_righe:
+                    if c in blk['s']:
+                        continue
+                    altrove = {json.dumps(x, ensure_ascii=False) for b2, blk2 in zip(chiavi, blocchi) if b2 != b for x in blk2['s'].get(c, {}).get('in', [])}
+                    qui = set()
+                    for r in per_blocco[b]:
+                        v = valore(r, c)
+                        for x in (v if isinstance(v, list) else [v]):
+                            qui.add(json.dumps(x, ensure_ascii=False))
+                    out = sorted(altrove - qui)
+                    if out:
+                        blk['s'][c] = {'out': [json.loads(x) for x in out]}
+            pos = {b: i for i, b in enumerate(chiavi)}
+            indice = {'v': versione, 'c': col_righe, 'p': pref, 'k': costanti, 'd': dizion, 'h': {'url': 'name'},
+                      'e': {c: a for c, a in UGUALI.items() if c in col_righe}, 'b': blocchi,
+                      'o': ''.join(chr(48 + pos[blocco_di(nome, r)]) for r in righe)}
+            f = ASSETS / f'uc-cfg-{nome}-{l}-indice.json'
+            f.write_text(json.dumps(indice, ensure_ascii=False, separators=(',', ':')))
+            tot = f.stat().st_size
+            for b, blk in zip(chiavi, blocchi):
+                fb = ASSETS / blk['f']
+                fb.write_text(json.dumps({'v': versione, 'r': tabelle[b]}, ensure_ascii=False, separators=(',', ':')))
+                tot += fb.stat().st_size
+            print(f.name, len(righe), 'righe', f.stat().st_size // 1024, 'KB; blocchi', ', '.join(f"{b['f'].split('-')[-1][:-5]} {b['n']}" for b in blocchi),
+                  '; totale', tot // 1024, 'KB')
+
+
+def file_catalogo(nome, l):
+    """Indice e blocchi di un catalogo, blocchi prima: l'indice si carica per ultimo, così non indica mai un file assente."""
+    indice = json.loads((ASSETS / f'uc-cfg-{nome}-{l}-indice.json').read_text())
+    return [b['f'] for b in indice['b']] + [f'uc-cfg-{nome}-{l}-indice.json'], sum(b['n'] for b in indice['b'])
 
 
 def carica():
-    """Carica i 10 file sul tema, uno alla volta (fino a ~14 MB l'uno). Se un file ha troppe poche righe non carica nulla:
-    sul tema resta il catalogo della notte prima."""
-    nomi = [f'uc-cfg-{n}-{l}.json' for n in MIN_RIGHE for l in LINGUE]
-    for n in nomi:
-        righe = len(json.loads((ASSETS / n).read_text())['r'])
-        if righe < MIN_RIGHE[n.split('-')[2]]:
-            raise SystemExit(f'{n}: {righe} righe, meno di {MIN_RIGHE[n.split("-")[2]]}: non carico nulla')
+    """Carica indici e blocchi sul tema (o sui temi), un file alla volta. Se un catalogo ha troppe poche righe non carica
+    nulla: sul tema resta il catalogo della notte prima."""
+    nomi = []
+    for n in MIN_RIGHE:
+        for l in LINGUE:
+            f, righe = file_catalogo(n, l)
+            if righe < MIN_RIGHE[n]:
+                raise SystemExit(f'uc-cfg-{n}-{l}: {righe} righe, meno di {MIN_RIGHE[n]}: non carico nulla')
+            nomi += f
     sh = Shopify()
-    tema = sh.gql('query($id:ID!){theme(id:$id){name role}}', {'id': TEMA})['theme']
-    print('tema', TEMA.rsplit('/', 1)[-1], tema, flush=True)
-    if not tema or 'non usare' in tema['name'].lower():   # [CHG-720] mai sul tema di riserva
-        raise SystemExit(f'tema {TEMA} non valido ({tema}): controllare SHOPIFY_TEMA, non carico nulla')
-    for n in nomi:
-        r = sh.gql('''mutation($id:ID!,$f:[OnlineStoreThemeFilesUpsertFileInput!]!){themeFilesUpsert(themeId:$id,files:$f){
-          upsertedThemeFiles{filename} userErrors{filename code message}}}''',
-                   {'id': TEMA, 'f': [{'filename': 'assets/' + n, 'body': {'type': 'TEXT', 'value': (ASSETS / n).read_text()}}]})['themeFilesUpsert']
-        if r['userErrors']:
-            raise RuntimeError(r['userErrors'])
-        print('caricato', n, flush=True)
+    for tema_id in TEMI:
+        tema = sh.gql('query($id:ID!){theme(id:$id){name role}}', {'id': tema_id})['theme']
+        print('tema', tema_id.rsplit('/', 1)[-1], tema, flush=True)
+        if not tema or 'non usare' in tema['name'].lower():   # [CHG-720] mai sul tema di riserva
+            raise SystemExit(f'tema {tema_id} non valido ({tema}): controllare SHOPIFY_TEMA, non carico nulla')
+        for n in nomi:
+            r = sh.gql('''mutation($id:ID!,$f:[OnlineStoreThemeFilesUpsertFileInput!]!){themeFilesUpsert(themeId:$id,files:$f){
+              upsertedThemeFiles{filename} userErrors{filename code message}}}''',
+                       {'id': tema_id, 'f': [{'filename': 'assets/' + n, 'body': {'type': 'TEXT', 'value': (ASSETS / n).read_text()}}]})['themeFilesUpsert']
+            if r['userErrors']:
+                raise RuntimeError(r['userErrors'])
+            print('caricato', n, flush=True)
 
 
 if __name__ == '__main__':
