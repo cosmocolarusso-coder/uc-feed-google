@@ -82,3 +82,10 @@ Poi scrive, per ogni catalogo e lingua, l'indice `uc-cfg-<rub|pav>-<lingua>-indi
 - **Variabili facoltative:** `SHOPIFY_SHOP` e `SHOPIFY_TEMA` (più temi separati da virgola). Se mancano si usano il negozio di prova `wmprxj-bx` e il tema di sviluppo 201462514008 «UC – Casa accolta (sviluppo)» (fino al 10/11/2026 il tema di prova 201114878296, ora fermo come copia: i suoi snippet leggono ancora i file interi; 201048392024 è la riserva «non usare», che lo script rifiuta). Se la variabile `SHOPIFY_TEMA` esiste nel repository GitHub, va messa a 201462514008. Al passaggio al negozio vero vanno cambiate.
 - **Protezione:** se la rubinetteria ha meno di 25.000 righe o i pavimenti meno di 12.000, non carica nulla e il lavoro risulta fallito. Sul tema resta il catalogo della notte prima.
 - **In locale**, dalla cartella `feed-google` dentro il repository del tema, usa `../shopify/.env` e le cartelle di prima. La fase `metafield`, che copia una volta i campi `uc_cfg` da Clerk, funziona solo in locale.
+
+## Passaggio a Shopify per lingua (CHG-949)
+`lingue-shopify.txt` elenca le lingue (es. `de,es`) i cui feed Google e Meta vengono generati da **Shopify** con `feed_shopify.py`,
+sovrascrivendo `out/feed-<l>.xml.gz` e `out/feed-meta-<l>.xml.gz` con gli stessi nomi: Merchant Center e Meta continuano a leggere
+gli stessi indirizzi. Le lingue non elencate restano da Storeden. File vuoto = tutto da Storeden. Prova generale: `de,es` dalla notte
+tra il 29 e il 30 novembre 2026; `it,en,fr,de,es` dalla notte prima del 7 dicembre. Servono i segreti `SHOPIFY_CLIENT_ID` e
+`SHOPIFY_CLIENT_SECRET` già usati dai configuratori. In caso di errore il passo fallisce e Pages tiene i feed della notte prima.

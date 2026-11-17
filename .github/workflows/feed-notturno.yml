@@ -47,6 +47,23 @@ jobs:
           MAX_CHIAMATE: ${{ inputs.max_chiamate || '90000' }}
           MAX_IMMAGINI: '10000'
         run: python3 -I genera_feed.py
+      # [CHG-949] Prova generale: le lingue elencate in lingue-shopify.txt (es. «de,es») prendono i feed Google e Meta da
+      # SHOPIFY (feed_shopify.py), con gli stessi nomi di file: Merchant Center e Meta non vanno toccati. Le altre lingue
+      # restano da Storeden. File vuoto = tutto da Storeden. Dal 30/11/2026: de,es; dal 7/12: it,en,fr,de,es.
+      - name: Feed da Shopify per le lingue in lingue-shopify.txt
+        env:
+          SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
+          SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
+          SHOPIFY_SHOP: ${{ vars.SHOPIFY_SHOP || 'wmprxj-bx.myshopify.com' }}
+        run: |
+          L="$(tr -d '[:space:]' < lingue-shopify.txt 2>/dev/null || true)"
+          if [ -z "$L" ]; then echo "lingue-shopify.txt vuoto: feed tutti da Storeden"; exit 0; fi
+          python3 -I feed_shopify.py --lingue "$L"
+          for l in $(echo "$L" | tr ',' ' '); do
+            cp "out/shopify/feed-$l.xml.gz" "out/feed-$l.xml.gz"
+            cp "out/shopify/feed-meta-$l.xml.gz" "out/feed-meta-$l.xml.gz"
+            echo "feed-$l e feed-meta-$l da Shopify"
+          done
       - uses: actions/cache/save@v4
         if: always() && hashFiles('stato/stato.json.gz') != ''
         with:
