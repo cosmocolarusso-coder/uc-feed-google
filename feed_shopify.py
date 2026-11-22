@@ -31,6 +31,9 @@ OUT = QUI / 'out' / 'shopify'
 SEED = QUI / 'seed'
 PAGES = 'https://cosmocolarusso-coder.github.io/uc-feed-google/'
 LOCALE = {'en': 'en', 'fr': 'fr', 'de': 'de', 'es': 'es'}
+# [CHG-1084] prezzi per paese: fuori dall'Italia il prezzo è quello che Shopify mostra in quel paese (IVA del paese e
+# listino del mercato), letto con contextualPricing; .com (en) usa i Paesi Bassi come paese di riferimento.
+PAESE = {'en': 'NL', 'fr': 'FR', 'de': 'DE', 'es': 'ES'}
 ESPORTA = '''{ products(query: "status:active") { edges { node {
   id handle title descriptionHtml vendor tags onlineStoreUrl
   uid: metafield(namespace: "uc_scheda", key: "storeden_uid") { value }
@@ -38,8 +41,9 @@ ESPORTA = '''{ products(query: "status:active") { edges { node {
   giorni: metafield(namespace: "uc_scheda", key: "giorni_consegna") { value }
   media(first: 11) { edges { node { preview { image { url } } } } }
   variants { edges { node { sku price compareAtPrice inventoryQuantity inventoryPolicy barcode
+    %s
     inventoryItem { measurement { weight { value unit } } } } } }
-} } } }'''
+} } } }''' % ' '.join(f'cp_{l}: contextualPricing(context: {{country: {c}}}) {{ price {{ amount }} compareAtPrice {{ amount }} }}' for l, c in PAESE.items())
 
 
 def log(*a):
@@ -156,6 +160,9 @@ def item(p, v, l, tr, perc, oggi):
             return None, 'non tradotto'
         titolo, descr = spazi(t[0]), testo(t[1])
     prezzo, barrato = float(v['price']), float(v.get('compareAtPrice') or 0)
+    cp = v.get('cp_' + l)
+    if cp and float((cp.get('price') or {}).get('amount') or 0) > 0:   # [CHG-1084] prezzo del paese
+        prezzo, barrato = float(cp['price']['amount']), float((cp.get('compareAtPrice') or {}).get('amount') or 0)
     # merce in magazzino prima di «su ordinazione», come il feed di oggi (giacenza > 0 = in_stock)
     if (v.get('inventoryQuantity') or 0) > 0:
         disp, data_disp = 'in_stock', None

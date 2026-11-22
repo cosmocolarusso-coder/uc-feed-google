@@ -54,6 +54,9 @@ TEMI = ['gid://shopify/OnlineStoreTheme/' + x.strip() for x in os.environ.get('S
 MIN_RIGHE = {'rub': 25000, 'pav': 12000}   # 03/11/2026: 35.756 e 18.327; sotto queste soglie l'esportazione è sospetta
 VERSIONE = '2026-10'
 LINGUE = ['it', 'en', 'fr', 'de', 'es']
+# [CHG-1084] prezzi per paese: fuori dall'Italia il prezzo è quello che Shopify mostra in quel paese (IVA del paese e
+# listino del mercato), letto con contextualPricing; .com (en) usa i Paesi Bassi come paese di riferimento.
+PAESE = {'en': 'NL', 'fr': 'FR', 'de': 'DE', 'es': 'ES'}
 FOTO = 'https://cdn.shopify.com/s/files/1/1024/4220/5528/files/'   # prefisso delle foto del negozio (nei file è in «p»)
 PROVA = '--prova' in sys.argv
 # categorie Storeden usate dalle app: rubinetteria (lavabo/bidet e set), mobili bagno (MOB_CAT del configuratore pavimenti)
@@ -83,8 +86,10 @@ ESPORTA = '''{ products(query: "status:active") { edges { node {
   %s
   featuredMedia { preview { image { url } } }
   media(first: 20) { edges { node { preview { image { url } } } } }
-  variants { edges { node { id sku price compareAtPrice availableForSale inventoryQuantity unitPrice { amount } } } }
-} } } }''' % '\n  '.join(f'{a}: metafield(namespace: "{n}", key: "{k}") {{ value }}' for a, (n, k) in METAFIELD.items())
+  variants { edges { node { id sku price compareAtPrice availableForSale inventoryQuantity unitPrice { amount }
+    %s } } }
+} } } }''' % ('\n  '.join(f'{a}: metafield(namespace: "{n}", key: "{k}") {{ value }}' for a, (n, k) in METAFIELD.items()),
+               ' '.join(f'cp_{l}: contextualPricing(context: {{country: {c}}}) {{ price {{ amount }} compareAtPrice {{ amount }} }}' for l, c in PAESE.items()))
 SET_BULK = ('mutation call($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) '
             '{ userErrors { field message } } }')
 
@@ -361,9 +366,15 @@ def riga(p, lingua, tradotti, nome_it=False):
     v = next(x for x in var if x['availableForSale'] and num(x['price']) > 0)
     camp = next((x for x in p['_var'] if re.search(r'_sample$', x.get('sku') or '', re.I) and x['availableForSale']), None)
     prezzo = num(v['price'])
+    barrato = num(v.get('compareAtPrice'))
     mq = num(p['mq'])
     al_mq = num((v.get('unitPrice') or {}).get('amount')) > 0
     mq_prezzo = num((v.get('unitPrice') or {}).get('amount')) or (round(prezzo / mq, 2) if mq else 0)
+    cp = v.get('cp_' + lingua)
+    if cp and num((cp.get('price') or {}).get('amount')) > 0 and prezzo:   # [CHG-1084] prezzo del paese
+        f = num(cp['price']['amount']) / prezzo
+        prezzo, barrato = num(cp['price']['amount']), num((cp.get('compareAtPrice') or {}).get('amount'))
+        mq_prezzo = round(mq_prezzo * f, 2)
     pre = '' if lingua == 'it' else '/' + lingua
     nome_l = (tradotti.get(p['id']) or {}).get(lingua) or p['title']
     img = senza_v(((p.get('featuredMedia') or {}).get('preview') or {}).get('image', {}).get('url')) if p.get('featuredMedia') else ''
@@ -379,7 +390,7 @@ def riga(p, lingua, tradotti, nome_it=False):
         # venduti al m² (prezzo unitario Shopify): prezzo e listino al m² come nel feed Clerk (le app confrontano sqmPrice
         # con list_price); battiscopa e simili restano a confezione anche se hanno i m² nella scheda
         'price': mq_prezzo if al_mq else prezzo,
-        'list_price': round(max(prezzo, num(v.get('compareAtPrice'))) * (mq_prezzo / prezzo if al_mq and prezzo else 1), 2),
+        'list_price': round(max(prezzo, barrato) * (mq_prezzo / prezzo if al_mq and prezzo else 1), 2),
         'stock': max(0, int(v.get('inventoryQuantity') or 0)),
         'sqmPrice': mq_prezzo if mq else 0,
         'collezione': serie_di(p),
