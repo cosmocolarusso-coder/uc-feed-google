@@ -34,11 +34,36 @@ LOCALE = {'en': 'en', 'fr': 'fr', 'de': 'de', 'es': 'es'}
 # [CHG-1084] prezzi per paese: fuori dall'Italia il prezzo è quello che Shopify mostra in quel paese (IVA del paese e
 # listino del mercato), letto con contextualPricing; .com (en) usa i Paesi Bassi come paese di riferimento.
 PAESE = {'en': 'NL', 'fr': 'FR', 'de': 'DE', 'es': 'ES'}
+# [CHG-1087] costo di spedizione per prodotto (g:shipping), all'estero: il negozio calcola a peso e per profilo, mentre le
+# norme degli account Merchant Center sono a fasce di prezzo. Il valore nel feed vale più della norma dell'account.
+# Tabelle = copia di assets/uc-sped.json del tema (profili veri di Shopify, shopify/tema-uc/sped_scheda.py tabelle):
+# dopo ogni cambio di tariffe ricopiarla in seed/uc-sped.json. Paesi = quelli delle norme di ogni account.
+PAESI_SPED = {'fr': ['FR', 'BE', 'NL'], 'de': ['DE', 'AT', 'BE', 'NL'], 'en': ['BE', 'NL'], 'es': ['ES']}
+try:
+    SPED = json.loads((SEED / 'uc-sped.json').read_text())
+except (OSError, ValueError):
+    SPED = None
+
+
+def costo_sped(profilo, paese, kg, prezzo):
+    """Spedizione di UN pezzo: per ogni zona del profilo che copre il paese la tariffa più bassa che vale (come il
+    carrello); se il paese è diviso in più zone (province) la più alta, per non dichiarare meno del vero."""
+    if not SPED or not kg:
+        return None
+    zone = [z for z in SPED['profili'].get(profilo) or [] if paese in z['c']]
+    costi = []
+    for z in zone:
+        ok = [r[4] for r in SPED['tabelle'][z['t']]
+              if r[0] <= kg and (r[1] is None or kg <= r[1]) and (r[2] is None or prezzo >= r[2]) and (r[3] is None or prezzo <= r[3])]
+        if ok:
+            costi.append(min(ok))
+    return max(costi) if costi else None
 ESPORTA = '''{ products(query: "status:active") { edges { node {
   id handle title descriptionHtml vendor tags onlineStoreUrl
   uid: metafield(namespace: "uc_scheda", key: "storeden_uid") { value }
   mq: metafield(namespace: "uc_scheda", key: "mq_confezione") { value }
   giorni: metafield(namespace: "uc_scheda", key: "giorni_consegna") { value }
+  sped: metafield(namespace: "uc_scheda", key: "profilo_sped") { value }
   media(first: 11) { edges { node { preview { image { url } } } } }
   variants { edges { node { sku price compareAtPrice inventoryQuantity inventoryPolicy barcode
     %s
@@ -206,11 +231,15 @@ def item(p, v, l, tr, perc, oggi):
     if w.get('value'):
         kg = float(w['value']) * {'GRAMS': 0.001, 'POUNDS': 0.4536, 'OUNCES': 0.02835}.get(w.get('unit'), 1)
         c.append(('g:shipping_weight', f'{round(kg, 3):g} kg'))
+        for paese in PAESI_SPED.get(l, []):   # [CHG-1087]
+            cs = costo_sped((p.get('sped') or {}).get('value') or 'g', paese, kg, prezzo)
+            if cs is not None:
+                c.append(('g:shipping', f'<g:country>{paese}</g:country><g:price>{cs:.2f} {valuta}</g:price>'))
     c += [('g:custom_label_0', brand or 'senza brand'), ('g:custom_label_1', cl1 or 'senza categoria'),
           ('g:custom_label_2', disp),
           ('g:custom_label_3', 'sotto 50' if prezzo < 50 else 'sotto 200' if prezzo < 200 else 'sotto 1000' if prezzo < 1000 else 'oltre 1000')]
     q = 999 if disp == 'backorder' else min(int(v.get('inventoryQuantity') or 0), GIACENZA_MAX) if disp == 'in_stock' else 0
-    return f'<item><!--q:{q}-->' + ''.join(f'<{k}>{escape(str(x))}</{k}>' for k, x in c) + '</item>\n', None
+    return f'<item><!--q:{q}-->' + ''.join(f'<{k}>{x if k == "g:shipping" else escape(str(x))}</{k}>' for k, x in c) + '</item>\n', None
 
 
 def scrivi(l, items):
