@@ -65,7 +65,7 @@ ESPORTA = '''{ products(query: "status:active") { edges { node {
   giorni: metafield(namespace: "uc_scheda", key: "giorni_consegna") { value }
   sped: metafield(namespace: "uc_scheda", key: "profilo_sped") { value }
   media(first: 40) { edges { node { alt preview { image { url } } } } }
-  variants { edges { node { sku price compareAtPrice inventoryQuantity inventoryPolicy barcode
+  variants { edges { node { id sku price compareAtPrice inventoryQuantity inventoryPolicy barcode image { url } selectedOptions { value }
     %s
     inventoryItem { measurement { weight { value unit } } } } } }
 } } } }''' % ' '.join(f'cp_{l}: contextualPricing(context: {{country: {c}}}) {{ price {{ amount }} compareAtPrice {{ amount }} }}' for l, c in PAESE.items())
@@ -176,7 +176,7 @@ def escluso(p, v):
     return None
 
 
-def item(p, v, l, tr, perc, oggi):
+def item(p, v, l, tr, perc, oggi, gruppo=None):
     _, dominio, valuta = LINGUE[l]
     if l == 'it':
         titolo, descr = p['title'], testo(p.get('descriptionHtml'))
@@ -202,8 +202,18 @@ def item(p, v, l, tr, perc, oggi):
     gcat = gcat or categoria_google(p['title'], pt)
     brand = pulisci_brand(p.get('vendor'))
     img = [u.split('?')[0] for u in p['_media']]
+    link = f"{dominio}/products/{p['handle']}"
+    if gruppo:   # [CHG-1113] prodotto con le finiture unite: un item per variante, raggruppati
+        fin = ' / '.join(o['value'] for o in (v.get('selectedOptions') or []) if o.get('value') != 'Default Title')
+        if fin: titolo = f'{titolo}, {fin}'
+        link += '?variant=' + v['id'].split('/')[-1]
+        vi = ((v.get('image') or {}).get('url') or '').split('?')[0]
+        if vi: img = [vi] + [u for u in img if u != vi]
     c = [('g:id', cod), ('g:title', titolo[:150]), ('g:description', (descr or titolo)[:5000]),
-         ('g:link', f"{dominio}/products/{p['handle']}"), ('g:image_link', img[0])]
+         ('g:link', link), ('g:image_link', img[0])]
+    if gruppo:
+        c.append(('g:item_group_id', gruppo))
+        if fin: c.append(('g:color', fin[:100]))
     c += [('g:additional_image_link', i) for i in img[1:11]]
     c += [('g:condition', 'new'), ('g:availability', disp)]
     if data_disp:
@@ -304,15 +314,21 @@ def main():
         f = SEED / f'percorsi-{l}.json.gz'
         perc = json.load(gzip.open(f, 'rt', encoding='utf-8')) if f.exists() else {}
         items, motivi, visti = [], {}, set()
+        coda = []
         for p in prod.values():
-            v = variante(p)
+            if 'uc-gessi-unito' in p.get('tags', []):   # [CHG-1113] finiture unite: tutte le varianti
+                vv = [x for x in p['_var'] if x.get('sku') and not re.search(r'[_-]sample$', x['sku'], re.I)]
+                coda += [(p, x, x['sku'].split('#')[0]) for x in vv]
+            else:
+                coda.append((p, variante(p), None))
+        for p, v, gruppo in coda:
             m = escluso(p, v)
             if not m and codice(v['sku'], perc) in visti:
                 m = 'codice doppio'
             if m:
                 motivi[m] = motivi.get(m, 0) + 1
                 continue
-            x, m = item(p, v, l, tr.get(l, {}), perc, oggi)
+            x, m = item(p, v, l, tr.get(l, {}), perc, oggi, gruppo)
             if m:
                 motivi[m] = motivi.get(m, 0) + 1
                 continue
