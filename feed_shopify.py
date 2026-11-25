@@ -64,7 +64,7 @@ ESPORTA = '''{ products(query: "status:active") { edges { node {
   mq: metafield(namespace: "uc_scheda", key: "mq_confezione") { value }
   giorni: metafield(namespace: "uc_scheda", key: "giorni_consegna") { value }
   sped: metafield(namespace: "uc_scheda", key: "profilo_sped") { value }
-  media(first: 11) { edges { node { preview { image { url } } } } }
+  media(first: 40) { edges { node { alt preview { image { url } } } } }
   variants { edges { node { sku price compareAtPrice inventoryQuantity inventoryPolicy barcode
     %s
     inventoryItem { measurement { weight { value unit } } } } } }
@@ -97,7 +97,8 @@ def esporta(sp):
             prod[x['__parentId']]['_var'].append(x)
         elif 'preview' in x:
             u = ((x.get('preview') or {}).get('image') or {}).get('url')
-            if u:
+            # [CHG-1100.4] i campioni colore (alt «Campione colore: …», pallini della scheda) non sono foto del prodotto
+            if u and not (x.get('alt') or '').startswith('Campione colore'):
                 prod[x['__parentId']]['_media'].append(u)
     return prod
 
