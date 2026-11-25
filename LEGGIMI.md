@@ -44,7 +44,9 @@ python3 genera_feed.py --campione          # mostra i campi di un prodotto dalle
 La chiave API si legge da `STOREDEN_KEY` / `STOREDEN_EXCHANGE`, oppure dal file `.chiave-storeden.txt` (escluso da git).
 
 ## GitHub
-- Il job «Feed Google notturno» parte alle 01:30 UTC; si può anche avviare a mano da Actions → Run workflow.
+- Il job «Feed Google notturno» è programmato alle 18:17, 21:17, 00:17 e 03:17 UTC (CHG-1093.4: GitHub avvia i giri programmati anche con 7–10 ore di ritardo, e Merchant Center legge alle 07:00 UTC). Un giro programmato che parte meno di 2 ore dopo l'ultima pubblicazione si ferma subito (job «controlla», legge `ultimo-giro.txt`). Si può anche avviare a mano da Actions → Run workflow: l'avvio a mano lavora sempre.
+- `ultimo-giro.txt` (pubblicato a ogni giro): ora dell'ultima pubblicazione e numero del giro.
+- Feed Meta (`feed-meta-<lingua>`): disponibilità solo «in stock» / «out of stock» (su ordinazione = «in stock» con `quantity_to_sell_on_facebook` 999); il feed Google resta in_stock / backorder / out_of_stock.
 - I feed sono su `https://cosmocolarusso-coder.github.io/uc-feed-google/feed-<lingua>.xml`; il riepilogo è in `rapporto.json`.
 
 ## Controlli di completezza (dal 19/10/2026)

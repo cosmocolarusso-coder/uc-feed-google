@@ -1,8 +1,16 @@
 name: Feed Google notturno
 
 on:
+  # [CHG-1093.4] Più orari invece del solo 01:30 UTC: dal 17/11/2026 GitHub avvia i giri programmati con 7–10 ore di
+  # ritardo (partiti fra 08:28 e 11:23 UTC), dopo la lettura di Merchant Center (08:00 in Italia = 07:00 UTC), che
+  # prendeva il feed del giorno prima. Con quattro orari almeno uno arriva prima delle 07:00 UTC anche con 10 ore di
+  # ritardo; un giro programmato che parte meno di 2 ore dopo l'ultima pubblicazione non rifà il lavoro (job «controlla»).
+  # Minuto 17: GitHub sconsiglia l'inizio dell'ora, il momento più carico.
   schedule:
-    - cron: '30 1 * * *'   # 01:30 UTC = 03:30 in Italia (02:30 con l'ora solare)
+    - cron: '17 18 * * *'   # 19:17 in Italia (ora solare)
+    - cron: '17 21 * * *'   # 22:17
+    - cron: '17 0 * * *'    # 01:17
+    - cron: '17 3 * * *'    # 04:17
   workflow_dispatch:        # avvio manuale dalla scheda Actions
     inputs:
       max_chiamate:
@@ -21,7 +29,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # [CHG-1093.4] Giro programmato già fatto da poco? ultimo-giro.txt (pubblicato a ogni giro) ha l'ora dell'ultima
+  # pubblicazione: sotto le 2 ore il giro programmato si ferma qui. L'avvio a mano lavora sempre.
+  controlla:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      fare: ${{ steps.c.outputs.fare }}
+    steps:
+      - id: c
+        env:
+          EVENTO: ${{ github.event_name }}
+        run: |
+          fare=true
+          if [ "$EVENTO" = "schedule" ]; then
+            t="$(curl -fsS --max-time 30 "https://cosmocolarusso-coder.github.io/uc-feed-google/ultimo-giro.txt?$(date +%s)" 2>/dev/null | head -1 | cut -d' ' -f1 || true)"
+            if [ -n "$t" ] && [ "$t" -eq "$t" ] 2>/dev/null; then
+              eta=$(( $(date -u +%s) - t ))
+              echo "ultima pubblicazione $(( eta / 60 )) minuti fa"
+              if [ "$eta" -lt 7200 ]; then fare=false; echo "giro saltato: feed pubblicati da meno di 2 ore"; fi
+            fi
+          fi
+          echo "fare=$fare" >> "$GITHUB_OUTPUT"
   genera:
+    needs: controlla
+    if: needs.controlla.outputs.fare == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 240
     environment:
@@ -88,6 +120,10 @@ jobs:
           git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" clerk-categorie
       # File fissi pubblicati insieme ai feed (foto di copertina del configuratore pavimenti: static/img)
       - run: cp -r static/. out/
+      # [CHG-1093.4] ora della pubblicazione (secondi dal 1970, ora UTC leggibile, giro): la legge il job «controlla»
+      - run: |
+          echo "$(date -u '+%s %Y-%m-%dT%H:%M:%SZ') run ${{ github.run_id }} ${{ github.event_name }}" > out/ultimo-giro.txt
+          cat out/ultimo-giro.txt
       - uses: actions/upload-pages-artifact@v3
         with:
           path: out

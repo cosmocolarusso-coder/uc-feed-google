@@ -247,9 +247,13 @@ def scrivi(l, items):
     testa = ('<?xml version="1.0" encoding="utf-8"?>\n<rss xmlns:g="http://base.google.com/ns/1.0" version="2.0"><channel>\n'
              f'<title>Universo Ceramiche</title><link>{dominio}</link><description>Feed prodotti {l.upper()} (Shopify)</description>\n')
     q = re.compile(r'<!--q:(\d+)-->')
-    meta_disp = re.compile(r'<g:availability>backorder</g:availability><g:availability_date>[^<]*</g:availability_date>')
+    # [CHG-1093.4] Meta accetta solo i valori con lo spazio («in stock», «out of stock»): prima si convertiva solo
+    # backorder e in_stock / out_of_stock passavano così. Su ordinazione = «in stock» (senza data), come sempre.
+    # Solo il campo availability: custom_label_2 resta in_stock / backorder / out_of_stock come nel feed Google.
+    meta_disp = re.compile(r'<g:availability>(in_stock|backorder|out_of_stock)</g:availability>(?:<g:availability_date>[^<]*</g:availability_date>)?')
+    meta_val = {'in_stock': 'in stock', 'backorder': 'in stock', 'out_of_stock': 'out of stock'}
     meta = lambda i: q.sub(r'<g:quantity_to_sell_on_facebook>\1</g:quantity_to_sell_on_facebook>',  # noqa: E731
-                           meta_disp.sub('<g:availability>in stock</g:availability>', i))
+                           meta_disp.sub(lambda m: f'<g:availability>{meta_val[m.group(1)]}</g:availability>', i))
     for nome, righe in ((f'feed-{l}.xml.gz', [q.sub('', i) for i in items]), (f'feed-meta-{l}.xml.gz', [meta(i) for i in items])):
         with gzip.open(OUT / nome, 'wt', encoding='utf-8', compresslevel=6) as f:
             f.write(testa)
