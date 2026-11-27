@@ -319,6 +319,9 @@ def main():
             if 'uc-gessi-unito' in p.get('tags', []):   # [CHG-1113] finiture unite: tutte le varianti
                 vv = [x for x in p['_var'] if x.get('sku') and not re.search(r'[_-]sample$', x['sku'], re.I)]
                 coda += [(p, x, x['sku'].split('#')[0]) for x in vv]
+            elif 'uc-bellosta-unito' in p.get('tags', []):   # [CHG-1135.2] Bellosta unite: SKU «04-7312/P/E» → gruppo BEL-7312/P/E
+                vv = [x for x in p['_var'] if x.get('sku') and not re.search(r'[_-]sample$', x['sku'], re.I)]
+                coda += [(p, x, 'BEL-' + re.sub(r'-[A-Z0-9]{2}$', '', x['sku'].split('-', 1)[-1])) for x in vv]
             else:
                 coda.append((p, variante(p), None))
         for p, v, gruppo in coda:
