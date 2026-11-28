@@ -84,9 +84,11 @@ METAFIELD = {  # alias → (namespace, key)
 ESPORTA = '''{ products(query: "status:active") { edges { node {
   id handle title vendor tags
   %s
+  options { name optionValues { id name } }
   featuredMedia { preview { image { url } } }
   media(first: 20) { edges { node { preview { image { url } } } } }
   variants { edges { node { id sku price compareAtPrice availableForSale inventoryQuantity unitPrice { amount }
+    selectedOptions { name value } image { url }
     %s } } }
 } } } }''' % ('\n  '.join(f'{a}: metafield(namespace: "{n}", key: "{k}") {{ value }}' for a, (n, k) in METAFIELD.items()),
                ' '.join(f'cp_{l}: contextualPricing(context: {{country: {c}}}) {{ price {{ amount }} compareAtPrice {{ amount }} }}' for l, c in PAESE.items()))
@@ -345,8 +347,19 @@ def nomi():
     with ThreadPoolExecutor(4) as ex:
         for d in ex.map(gruppo, range(0, len(ids), 250)):
             out.update(d)
+    # [CHG-1144] nomi tradotti dei valori «Finitura» delle schede unite (una riga per finitura)
+    ovs = sorted({ov['id'] for g in ids for o in (prodotti[g].get('options') or []) if o['name'] == OPZ_FINITURA
+                  and len(o['optionValues']) > 1 for ov in o['optionValues']})
+
+    def gruppo2(i):
+        n = sh.gql(q, {'ids': ovs[i:i + 250]})['translatableResourcesByIds']['nodes']
+        return {x['resourceId']: {l: next((t['value'] for t in x[l] if t['key'] == 'name'), '') for l in LINGUE[1:]} for x in n}
+
+    with ThreadPoolExecutor(4) as ex:
+        for d in ex.map(gruppo2, range(0, len(ovs), 250)):
+            out.update(d)
     json.dump(out, open(NOMI, 'w'), ensure_ascii=False)
-    print('nomi', len(out), 'di', len(ids))
+    print('nomi', len(out), 'di', len(ids), '+ finiture', len(ovs))
 
 
 def num(x):
@@ -356,14 +369,56 @@ def num(x):
         return 0.0
 
 
-def riga(p, lingua, tradotti, nome_it=False):
+OPZ_FINITURA = 'Finitura'
+
+
+def finiture_unite(p):
+    """[CHG-1144] Schede unite (Gessi, Bellosta, Paffoni…): opzione «Finitura» con più valori → {nome valore: id del valore}."""
+    o = next((o for o in (p.get('options') or []) if o['name'] == OPZ_FINITURA), None)
+    return {ov['name']: ov['id'] for ov in o['optionValues']} if o and len(o['optionValues']) > 1 else {}
+
+
+def righe_prodotto(p, lingua, tradotti, nome_it=False):
+    """[CHG-1144] Una riga per prodotto; per le schede unite una riga per ogni finitura acquistabile (prima ce n'era una
+    sola, con la variante principale: nel configuratore Gessi e Bellosta uniti avevano una sola finitura).
+    Nella riga della finitura: nome «<titolo> <finitura>» (l'app toglie la finitura dal nome), finitura = valore dell'opzione, foto della variante, link ?variant=."""
+    fin = finiture_unite(p)
+    if not fin:
+        r = riga(p, lingua, tradotti, nome_it)
+        return [r] if r else []
+    out = []
+    for v in p['_var']:
+        if re.search(r'_sample$', v.get('sku') or '', re.I) or not v['availableForSale'] or num(v['price']) <= 0:
+            continue
+        val = next((x['value'] for x in v.get('selectedOptions') or [] if x['name'] == OPZ_FINITURA), None)
+        if not val:
+            continue
+        r = riga(p, lingua, tradotti, nome_it, variante=v)
+        if not r:
+            continue
+        val_l = (tradotti.get(fin.get(val)) or {}).get(lingua) or val
+        r['name'] = f"{r['name']} {val if lingua == 'it' or nome_it else val_l}"
+        if r['nl']:
+            r['nl'] = f"{r['nl']} {val_l}"
+        elif lingua != 'it' and val_l != val:
+            r['nl'] = f"{p['title']} {val_l}"
+        r['finitura'] = val
+        r['url'] += f"?variant={r['id']}"
+        img = senza_v((v.get('image') or {}).get('url'))
+        if img:
+            r['image'] = img
+        out.append(r)
+    return out
+
+
+def riga(p, lingua, tradotti, nome_it=False, variante=None):
     """Una riga per prodotto, con la variante principale (non il campione); i campi hanno i nomi del feed Clerk.
     nome_it: «name» resta italiano anche nei siti esteri e il nome tradotto va in «nl» (rubinetti: il tipo di pezzo si
     riconosce dal nome italiano, CHG-543); altrimenti «name» è nella lingua del sito, come nei cataloghi Clerk esteri."""
     var = [v for v in p['_var'] if not re.search(r'_sample$', v.get('sku') or '', re.I)]
     if not var or not any(x['availableForSale'] and num(x['price']) > 0 for x in var):
         return None
-    v = next(x for x in var if x['availableForSale'] and num(x['price']) > 0)
+    v = variante or next(x for x in var if x['availableForSale'] and num(x['price']) > 0)
     camp = next((x for x in p['_var'] if re.search(r'_sample$', x.get('sku') or '', re.I) and x['availableForSale']), None)
     prezzo = num(v['price'])
     barrato = num(v.get('compareAtPrice'))
@@ -477,7 +532,7 @@ def catalogo():
     for nome, ids in gruppi.items():
         col = COLONNE[nome]
         for l in LINGUE:
-            righe = [r for r in (riga(prodotti[g], l, tradotti, nome == 'rub') for g in sorted(ids, key=ordine)) if r]
+            righe = [r for g in sorted(ids, key=ordine) for r in righe_prodotto(prodotti[g], l, tradotti, nome == 'rub')]
             pref = {'url': f'{"" if l == "it" else "/" + l}/products/'}
             pref.update({c: FOTO for c in ('image', 'cfg_foto_amb', 'cfg_foto_tex') if c in col})
             for r in righe:
